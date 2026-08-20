@@ -143,8 +143,18 @@ function parseRtf(arrayBuffer: ArrayBuffer): string[] {
   }
   // RTF is ASCII + \'hh escapes; decoding as windows-1252 is safe and
   // preserves the escape bytes exactly.
-  const text = new TextDecoder("windows-1252").decode(arrayBuffer);
-  const plain = rtfToText(text);
+  let text: string;
+  try {
+    text = new TextDecoder("windows-1252").decode(arrayBuffer);
+  } catch (decodeErr) {
+    throw new Error("Unable to decode RTF file: " + (decodeErr instanceof Error ? decodeErr.message : String(decodeErr)));
+  }
+  let plain: string;
+  try {
+    plain = rtfToText(text);
+  } catch (rtfErr) {
+    throw new Error("Unable to parse RTF content: " + (rtfErr instanceof Error ? rtfErr.message : String(rtfErr)));
+  }
   return filterArtifacts(splitLines(plain));
 }
 
@@ -355,6 +365,7 @@ export async function parseFile(file: File): Promise<ParsedDoc> {
       content,
     };
   } catch (err) {
+    const errMsg = err instanceof Error ? err.message : "Failed to parse file";
     return {
       id,
       path,
@@ -364,7 +375,7 @@ export async function parseFile(file: File): Promise<ParsedDoc> {
       stem,
       versionTag: version,
       size: file.size,
-      error: err instanceof Error ? err.message : "Failed to parse file",
+      error: "Unable to parse '" + fileName + "': " + errMsg,
     };
   }
 }
