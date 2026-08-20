@@ -758,6 +758,126 @@ export function compareCanonical(
     }
   }
 
+  // Phase 5: Match pipe-containing paragraphs against field_values
+  // When PDF produces "Account | 1000" as a paragraph but RTF produces it
+  // as a field_value, they need to match across kinds.
+  const unmatchedProseBaselinePhase5 = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) =>
+      (el.kind === "paragraph" || el.kind === "list_item") &&
+      el.value.includes("|") &&
+      !el.value.includes(":")
+    );
+  const unmatchedKVComparingPhase5 = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+
+  for (const { el: bEl, idx: bIdx } of unmatchedProseBaselinePhase5) {
+    const parts = bEl.value.split("|").map(p => p.trim()).filter(p => p !== "");
+    if (parts.length < 2) continue;
+    const paraField = normalizeKey(parts[0]);
+    const paraValue = parts[1];
+
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComparingPhase5) {
+      if (usedComp.has(cIdx)) continue;
+      if (cEl.key === paraField && valuesEqual(paraValue, cEl.value)) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Phase 6: Reverse — field_value in baseline vs pipe-containing paragraph in comparing
+  const unmatchedKVBaselinePhase6 = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedProseComparingPhase6 = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) =>
+      (el.kind === "paragraph" || el.kind === "list_item") &&
+      el.value.includes("|") &&
+      !el.value.includes(":")
+    );
+
+  for (const { el: bEl, idx: bIdx } of unmatchedKVBaselinePhase6) {
+    for (const { el: cEl, idx: cIdx } of unmatchedProseComparingPhase6) {
+      if (usedComp.has(cIdx)) continue;
+      const parts = cEl.value.split("|").map(p => p.trim()).filter(p => p !== "");
+      if (parts.length < 2) continue;
+      const paraField = normalizeKey(parts[0]);
+      const paraValue = parts[1];
+
+      if (bEl.key === paraField && valuesEqual(bEl.value, paraValue)) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Phase 7: Match structured paragraphs against field_values
+  // When PDF produces "Account 1000" as a paragraph (no pipe/colon)
+  // but RTF produces "Account | 1000" as a field_value, match them.
+  // Strategy: for unmatched paragraphs, try to find a field_value in
+  // the comparing document whose value appears as a suffix of the paragraph.
+  const unmatchedProseBaselinePhase7 = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) =>
+      (el.kind === "paragraph" || el.kind === "list_item") &&
+      !el.value.includes("|") && !el.value.includes(":")
+    );
+  const unmatchedKVComparingPhase7 = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+
+  for (const { el: bEl, idx: bIdx } of unmatchedProseBaselinePhase7) {
+    const paraNorm = normalizeValue(bEl.value, mode).toLowerCase();
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComparingPhase7) {
+      if (usedComp.has(cIdx)) continue;
+      const valNorm = normalizeValue(cEl.value, mode).toLowerCase();
+      // Check if the paragraph text ends with the field value
+      // e.g., "account 1000" ends with "1000" → matches key="account"
+      if (valNorm.length > 0 && paraNorm.endsWith(valNorm)) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Phase 8: Reverse — field_value in baseline vs structured paragraph in comparing
+  const unmatchedKVBaselinePhase8 = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedProseComparingPhase8 = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) =>
+      (el.kind === "paragraph" || el.kind === "list_item") &&
+      !el.value.includes("|") && !el.value.includes(":")
+    );
+
+  for (const { el: bEl, idx: bIdx } of unmatchedKVBaselinePhase8) {
+    for (const { el: cEl, idx: cIdx } of unmatchedProseComparingPhase8) {
+      if (usedComp.has(cIdx)) continue;
+      const paraNorm = normalizeValue(cEl.value, mode).toLowerCase();
+      const valNorm = normalizeValue(bEl.value, mode).toLowerCase();
+      if (valNorm.length > 0 && paraNorm.endsWith(valNorm)) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
   // Collect remaining unmatched as missing/added
   const missingInComparing = Array.from(unmatchedBaseline).map(i => baseline.items[i]);
   const addedInComparing = Array.from(unmatchedComparing).map(i => comparing.items[i]);
