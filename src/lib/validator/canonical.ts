@@ -111,65 +111,86 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
   const pairs: Array<{ field: string; value: string }> = [];
   const trimmed = text.trim();
 
-  // Pattern 1: Pipe-delimited — "Field | Value" or "Field | Value | Extra"
-  // But ONLY if the first part doesn't contain a colon (which would mean
-  // it's a sentence like "Account: 1000 | Synthetic data" with pipes as
-  // visual separators, not a table row).
+  // Helper: extract a single segment using colon/equals/space patterns
+  function extractFromSegment(segment: string): { field: string; value: string } | null {
+    const s = segment.trim();
+    if (s === "") return null;
+
+    // Colon-separated: "Field: Value"
+    const colonMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(s);
+    if (colonMatch) {
+      const val = colonMatch[2].trim();
+      if (val.includes("|")) return null;
+      return { field: colonMatch[1].trim(), value: val };
+    }
+
+    // Equals-separated: "Field = Value"
+    const equalsMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(s);
+    if (equalsMatch) {
+      return { field: equalsMatch[1].trim(), value: equalsMatch[2].trim() };
+    }
+
+    // Space-separated with 2+ spaces: "Field  Value"
+    const spaceGapMatch = /^([A-Za-z][A-Za-z ]{0,30}?)\s{2,}(.+)$/.exec(s);
+    if (spaceGapMatch) {
+      const field = spaceGapMatch[1].trim();
+      const value = spaceGapMatch[2].trim();
+      if (field.length > 0 && field.length <= 30 && /^[A-Za-z]/.test(field) && !/[0-9]/.test(field)) {
+        const isHeader = field.length <= 5 && value.length <= 5 &&
+          /^[A-Za-z][A-Za-z ]*$/.test(field) && /^[A-Za-z][A-Za-z ]*$/.test(value);
+        if (!isHeader) return { field, value };
+      }
+    }
+
+    // Single-space separated: "Field Value" where value is numeric
+    // Catches PDF table rows like "Account 1000" or "Customer Since 2021-06-15"
+    // where the parser didn't insert pipes and the gap is only one space.
+    const singleSpaceMatch = /^([A-Za-z][A-Za-z ]{0,30}?)\s(.+)$/.exec(s);
+    if (singleSpaceMatch) {
+      const field = singleSpaceMatch[1].trim();
+      const value = singleSpaceMatch[2].trim();
+      // Only match when the value is purely numeric (digits, commas, dots, hyphens, colons)
+      // This prevents leaking parser artifacts like "onttbl 0 Arial;"
+      if (field.length > 0 && field.length <= 30 && field.length >= 3 &&
+        /^[A-Za-z]/.test(field) && !/[0-9]/.test(field) &&
+        /^[0-9][0-9,.:\-/]*$/.test(value)) {
+        return { field, value };
+      }
+    }
+
+    return null;
+  }
+
+  // Pattern 1: Pipe-delimited segments
   if (trimmed.includes("|")) {
     const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
     if (parts.length >= 2) {
-      // If first part has a colon, this is a sentence with pipe separators.
-      // Fall through to colon/other extraction patterns below.
-      if (!parts[0].includes(":")) {
-        // Check if this is a header row (all alpha-only, short)
-        // Header rows have SHORT parts (e.g., "Field | Value").
-        // Longer values like "Customer Alpha" mean this is a data row.
-        const isHeader = parts.length === 2 &&
-          parts.every(p =>
-            p.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(p)
-          );
-        if (!isHeader) {
-          pairs.push({ field: parts[0], value: parts[1] });
-          return pairs;
-        }
-      }
-    }
-  }
-
-  // Pattern 2: Colon-separated — "Field: Value"
-  const colonMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(trimmed);
-  if (colonMatch) {
-    const val = colonMatch[2].trim();
-    // If the value contains pipes, this is a sentence with pipe separators
-    // (e.g., "Account: 1000 | Synthetic data"), not a field_value.
-    if (val.includes("|")) {
-      // Skip — will be handled as paragraph
-      return pairs;
-    }
-    pairs.push({ field: colonMatch[1].trim(), value: val });
-    return pairs;
-  }
-
-  // Pattern 3: Equals-separated — "Field = Value"
-  const equalsMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(trimmed);
-  if (equalsMatch) {
-    pairs.push({ field: equalsMatch[1].trim(), value: equalsMatch[2].trim() });
-    return pairs;
-  }
-
-  // Pattern 4: Space-separated table data — "Field  Value" (2+ spaces between)
-  // This catches PDF table rows where the parser didn't insert pipes.
-  const spaceGapMatch = /^([A-Za-z][A-Za-z ]{0,30}?)\s{2,}(.+)$/.exec(trimmed);
-  if (spaceGapMatch) {
-    const field = spaceGapMatch[1].trim();
-    const value = spaceGapMatch[2].trim();
-    if (field.length > 0 && field.length <= 30 && /^[A-Za-z]/.test(field) && !/[0-9]/.test(field)) {
-      const isHeader = field.length <= 5 && value.length <= 5 &&
-        /^[A-Za-z][A-Za-z ]*$/.test(field) && /^[A-Za-z][A-Za-z ]*$/.test(value);
+      // Check if this is a header row (all alpha-only, short)
+      const isHeader = parts.length === 2 &&
+        parts.every(p => p.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(p));
       if (!isHeader) {
-        pairs.push({ field, value });
+        // Split on pipes and extract field_value from each segment.
+        // This handles lines like "Account: 1000 | Synthetic data | No real PHI"
+        // where each pipe-separated segment is a separate field/value.
+        for (const segment of parts) {
+          const extracted = extractFromSegment(segment);
+          if (extracted) {
+            pairs.push(extracted);
+          }
+        }
+        if (pairs.length > 0) return pairs;
+        // Fallback: use first two parts as field/value
+        pairs.push({ field: parts[0], value: parts[1] });
+        return pairs;
       }
     }
+  }
+
+  // Pattern 2: Single segment extraction (no pipes)
+  const single = extractFromSegment(trimmed);
+  if (single) {
+    pairs.push(single);
+    return pairs;
   }
 
   return pairs;
@@ -721,10 +742,24 @@ export function compareCanonical(
   for (const { el: bEl, idx: bIdx } of unmatchedProseBaseline) {
     for (const { el: cEl, idx: cIdx } of unmatchedKVComparing) {
       if (usedComp.has(cIdx)) continue;
-      // Check if the paragraph value contains the field value
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      if (bNorm.includes(cNorm) || cNorm.includes(bNorm)) {
+      // Stricter matching: avoid consuming field_values with concatenated paragraphs.
+      // Only match if the paragraph looks like a single field:value pair.
+      // Guard: paragraph must not be too long (concatenated rows are long).
+      if (bNorm.length > 80) continue;
+      // Prefer exact match
+      if (bNorm === cNorm) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+      // Substring match: only if field key appears in paragraph text
+      // AND paragraph is short enough to be a single field:value pair
+      const keyInParagraph = bNorm.includes(cEl.key) || bNorm.includes(normalizeKey(cEl.label));
+      if (keyInParagraph && bNorm.length < 80) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -748,7 +783,16 @@ export function compareCanonical(
       if (usedComp.has(bIdx)) continue;
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      if (bNorm.includes(cNorm) || cNorm.includes(bNorm)) {
+      if (cNorm.length > 80) continue;
+      if (bNorm === cNorm) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(bIdx);
+        break;
+      }
+      const keyInParagraph = cNorm.includes(bEl.key) || cNorm.includes(normalizeKey(bEl.label));
+      if (keyInParagraph && cNorm.length < 80) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -840,9 +884,19 @@ export function compareCanonical(
     for (const { el: cEl, idx: cIdx } of unmatchedKVComparingPhase7) {
       if (usedComp.has(cIdx)) continue;
       const valNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      // Check if the paragraph text ends with the field value
-      // e.g., "account 1000" ends with "1000" → matches key="account"
-      if (valNorm.length > 0 && paraNorm.endsWith(valNorm)) {
+      if (valNorm.length === 0) continue;
+      // Match "Account 1000" paragraph against field_value key="account" value="1000"
+      // Strategy: paragraph ends with the value AND contains the field name
+      const keyInPara = paraNorm.includes(cEl.key) || paraNorm.includes(normalizeKey(cEl.label));
+      if (keyInPara && paraNorm.endsWith(valNorm)) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+      // Also match if paragraph is just the value (e.g. "1000" == "1000")
+      if (paraNorm === valNorm) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -877,6 +931,7 @@ export function compareCanonical(
       }
     }
   }
+
 
   // Collect remaining unmatched as missing/added
   const missingInComparing = Array.from(unmatchedBaseline).map(i => baseline.items[i]);
