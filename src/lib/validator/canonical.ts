@@ -169,9 +169,18 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
       const isHeader = parts.length === 2 &&
         parts.every(p => p.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(p));
       if (!isHeader) {
+        // If the first segment contains a colon, the pipes are likely
+        // visual separators in a sentence (e.g., "Account: 1000 | Synthetic data | No real PHI"),
+        // NOT table column delimiters. In this case, extract only the colon-separated
+        // field_value from the first segment, not from all segments.
+        if (parts[0].includes(":")) {
+          // Line like "Account: 1000 | Synthetic data | No real PHI" —
+          // pipes are visual separators in a sentence, NOT table delimiters.
+          // The first segment is a colon-separated metadata line that appears
+          // before the actual data table. Return empty so caller treats it as paragraph.
+          return pairs;
+        }
         // Split on pipes and extract field_value from each segment.
-        // This handles lines like "Account: 1000 | Synthetic data | No real PHI"
-        // where each pipe-separated segment is a separate field/value.
         for (const segment of parts) {
           const extracted = extractFromSegment(segment);
           if (extracted) {
@@ -494,12 +503,27 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     // Check for field/value in remaining text
     const fvPairs = extractFieldValuesFromText(trimmed);
     if (fvPairs.length > 0) {
+      // Check if this line appears immediately before a pipe table block.
+      // If so, it's likely report metadata (e.g., "Account: 1000") that
+      // identifies the report, not actual data. Treat as paragraph.
+      const nextNonEmpty = lines.findIndex((l, j) => j > i && l.trim() !== "" && pipeTableLines.has(j));
+      const isBeforeTable = nextNonEmpty === i + 1 || (nextNonEmpty > i && nextNonEmpty - i <= 2);
+      
+      // Also check: if the value matches a pure number/ID pattern and
+      // the field is a common metadata name, it's metadata.
+      const isMetadata = fvPairs.length === 1 &&
+        isBeforeTable &&
+        fvPairs[0].field.length <= 20 &&
+        /^[A-Za-z][A-Za-z ]*$/.test(fvPairs[0].field) &&
+        !fvPairs[0].value.includes("|") &&
+        fvPairs[0].value.length < 30;
+      
       for (const { field, value } of fvPairs) {
         items.push({
           key: normalizeKey(field),
           label: field,
           value,
-          kind: "field_value",
+          kind: isMetadata ? "paragraph" : "field_value",
           sourceLocation: `Line ${i + 1}`,
         });
       }

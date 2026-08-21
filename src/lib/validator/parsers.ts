@@ -225,15 +225,93 @@ function parseSheet(arrayBuffer: ArrayBuffer, ext: "xlsx" | "xls" | "csv"): Shee
       }
       if (currentRow.length > 0) rows.push(currentRow);
 
-      // For each row, detect column gaps and insert pipe separators
+      // Cross-row table detection: check if multiple rows have items at
+      // consistent X-positions. If so, insert pipes at those positions.
+      // This handles tables where per-row gap detection fails because
+      // column gaps are too small (e.g., compact ReportLab tables).
+      
+      // First, sort each row by X and collect X-position sets
+      const rowXPositions: number[][] = [];
       for (const row of rows) {
-        // Sort by X position
         row.sort((a, b) => a.x - b.x);
-
-        // Adaptive column gap detection:
-        // Calculate the median gap between consecutive non-empty items.
-        // A gap significantly larger than the median indicates a column boundary.
-        const nonEmptyItems = row.filter((item) => item.str.trim() !== "");
+        const nonEmpty = row.filter(item => item.str.trim() !== "");
+        rowXPositions.push(nonEmpty.map(it => Math.round(it.x)));
+      }
+      
+      // Find X-positions that appear in 2+ rows (within tolerance of 5px)
+      const xPosCounts = new Map<number, number>();
+      for (const xPosArr of rowXPositions) {
+        // Deduplicate within the same row
+        const unique = [...new Set(xPosArr)];
+        for (const x of unique) {
+          // Find if there's a close existing position
+          let merged = false;
+          for (const [key, count] of xPosCounts) {
+            if (Math.abs(key - x) <= 5) {
+              xPosCounts.set(key, count + 1);
+              merged = true;
+              break;
+            }
+          }
+          if (!merged) xPosCounts.set(x, 1);
+        }
+      }
+      
+      // Column X-positions: positions appearing in 2+ rows
+      const columnXPositions = Array.from(xPosCounts.entries())
+        .filter(([_, count]) => count >= 2)
+        .map(([x, _]) => x)
+        .sort((a, b) => a - b);
+      
+      // For each row, use column positions to insert pipes
+      for (const row of rows) {
+        const nonEmptyItems = row.filter(item => item.str.trim() !== "");
+        if (nonEmptyItems.length < 2) {
+          if (nonEmptyItems.length === 1) lines.push(nonEmptyItems[0].str.trim());
+          continue;
+        }
+        
+        const avgCharWidth = 5;
+        
+        // Method 1: Cross-row table detection
+        if (columnXPositions.length >= 2) {
+          // Map each item to its nearest column position
+          const itemsByCol = new Map<number, string[]>();
+          for (const item of nonEmptyItems) {
+            let bestCol = columnXPositions[0];
+            let bestDist = Math.abs(item.x - bestCol);
+            for (const colX of columnXPositions) {
+              const dist = Math.abs(item.x - colX);
+              if (dist < bestDist) {
+                bestCol = colX;
+                bestDist = dist;
+              }
+            }
+            // Only assign if within 20px of a column position
+            if (bestDist <= 20) {
+              if (!itemsByCol.has(bestCol)) itemsByCol.set(bestCol, []);
+              itemsByCol.get(bestCol)!.push(item.str.trim());
+            } else {
+              // Item not in any column — append to nearest or create new
+              const key = -1; // fallback bucket
+              if (!itemsByCol.has(key)) itemsByCol.set(key, []);
+              itemsByCol.get(key)!.push(item.str.trim());
+            }
+          }
+          
+          // Build line from column positions
+          const sortedCols = Array.from(itemsByCol.keys()).sort((a, b) => a - b);
+          const lineParts: string[] = [];
+          for (const col of sortedCols) {
+            const texts = itemsByCol.get(col)!;
+            lineParts.push(texts.join(" "));
+          }
+          const line = lineParts.filter(p => p !== "").join(" | ");
+          if (line.trim() !== "") lines.push(line.trim());
+          continue;
+        }
+        
+        // Method 2: Per-row gap detection (fallback for non-table layouts)
         const gaps: number[] = [];
         for (let gi = 1; gi < nonEmptyItems.length; gi++) {
           const prev = nonEmptyItems[gi - 1];
@@ -242,51 +320,34 @@ function parseSheet(arrayBuffer: ArrayBuffer, ext: "xlsx" | "xls" | "csv"): Shee
           const gap = curr.x - estimatedPrevEnd;
           if (gap > 0) gaps.push(gap);
         }
-
-        // Median gap serves as the threshold for column boundaries
-        let colGapThreshold = 30; // Default fallback
+        
+        let colGapThreshold = 30;
         if (gaps.length > 0) {
           const sortedGaps = [...gaps].sort((a, b) => a - b);
           const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
-          // A column boundary is a gap at least 2.5x the median inter-word gap
-          colGapThreshold = medianGap * 2.5;
-          // Clamp to reasonable bounds
-          colGapThreshold = Math.max(20, Math.min(colGapThreshold, 200));
+          colGapThreshold = Math.max(20, Math.min(medianGap * 1.5, 80));
         }
-
+        
         let line = "";
         let lastX: number | null = null;
-        const avgCharWidth = 5;
-
         for (const item of nonEmptyItems) {
           if (lastX !== null) {
             const estimatedPrevEnd = lastX;
             const gap = item.x - estimatedPrevEnd;
-            // Large gap = column boundary → insert pipe separator
-            if (gap > colGapThreshold) {
-              line += " | ";
-            } else {
-              line += " ";
-            }
+            line += gap > colGapThreshold ? " | " : " ";
           }
           line += item.str;
           lastX = item.x + item.str.length * avgCharWidth;
         }
-
-        // Post-process: if the line has 2+ items with no pipes but has
-        // significant gaps, force pipe insertion for table-like patterns.
-        if (!line.includes("|") && nonEmptyItems.length >= 2) {
-          // Check if this looks like a 2-column table header:
-          // both items are short alpha-only text
-          const allAlpha = nonEmptyItems.every(
-            (it) => it.str.trim().length > 0 && it.str.trim().length < 30 && /^[A-Za-z]/.test(it.str.trim())
-          );
-          if (allAlpha && nonEmptyItems.length === 2) {
-            // Force pipe between the two items
+        
+        // Post-process: for 2-item rows with any gap, force pipe
+        if (!line.includes("|") && nonEmptyItems.length === 2) {
+          const gap = nonEmptyItems[1].x - (nonEmptyItems[0].x + nonEmptyItems[0].str.trim().length * avgCharWidth);
+          if (gap > 15) {
             line = `${nonEmptyItems[0].str.trim()} | ${nonEmptyItems[1].str.trim()}`;
           }
         }
-
+        
         if (line.trim() !== "") lines.push(line.trim());
       }
 
