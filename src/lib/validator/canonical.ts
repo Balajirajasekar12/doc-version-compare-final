@@ -801,15 +801,49 @@ export function compareCanonical(
     .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
 
   for (const { el: bEl, idx: bIdx } of unmatchedProseBaseline) {
-    // Skip paragraphs that contain pipe separators — these are concatenated rows
-    // like "Account: 1000 | Synthetic data | No real PHI" from PDF parser.
-    if (bEl.value.includes("|")) continue;
+    // For pipe-containing paragraphs, try to match each pipe segment
+    // against a field_value. E.g., "Account: 1000 | Synthetic data | No real PHI"
+    // has segment "Account: 1000" which matches field_value key=account, value=1000.
+    if (bEl.value.includes("|")) {
+      const segments = bEl.value.split("|").map(s => s.trim()).filter(s => s.length > 0);
+      const matchedSegments = new Set<number>();
+      for (const seg of segments) {
+        const segLower = seg.toLowerCase();
+        for (const { el: cEl, idx: cIdx } of unmatchedKVComparing) {
+          if (usedComp.has(cIdx) || matchedSegments.has(cIdx)) continue;
+          const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+          // Exact value match
+          if (segLower === cNorm) {
+            matched.push({ baseline: bEl, comparing: cEl, identical: true });
+            matchedSegments.add(cIdx);
+            break;
+          }
+          // Segment contains field key and ends with value
+          const keyInSeg = segLower.includes(cEl.key) || segLower.includes(normalizeKey(cEl.label));
+          if (keyInSeg && cNorm.length > 0 && segLower.includes(cNorm)) {
+            matched.push({ baseline: bEl, comparing: cEl, identical: true });
+            matchedSegments.add(cIdx);
+            break;
+          }
+        }
+      }
+      if (matchedSegments.size > 0) {
+        // Mark paragraph as matched (structural content)
+        unmatchedBaseline.delete(bIdx);
+        for (const idx of matchedSegments) {
+          unmatchedComparing.delete(idx);
+          usedComp.add(idx);
+        }
+      }
+      continue;
+    }
+    // Non-pipe paragraph matching
     for (const { el: cEl, idx: cIdx } of unmatchedKVComparing) {
       if (usedComp.has(cIdx)) continue;
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
       // Guard: paragraph must not be too long (concatenated rows are long).
-      if (bNorm.length > 80) continue;
+      if (bNorm.length > 120) continue;
       // Prefer exact match
       if (bNorm === cNorm) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
@@ -819,7 +853,6 @@ export function compareCanonical(
         break;
       }
       // Substring match: only if field key appears in paragraph text
-      // AND paragraph is short enough to be a single field:value pair
       const keyInParagraph = bNorm.includes(cEl.key) || bNorm.includes(normalizeKey(cEl.label));
       if (keyInParagraph && bNorm.length < 80) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
@@ -841,13 +874,11 @@ export function compareCanonical(
     .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
 
   for (const { el: cEl, idx: cIdx } of unmatchedProseComparing) {
-    // Skip paragraphs that contain pipe separators — concatenated rows
-    if (cEl.value.includes("|")) continue;
     for (const { el: bEl, idx: bIdx } of unmatchedKVBaseline) {
       if (usedComp.has(bIdx)) continue;
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      if (cNorm.length > 80) continue;
+      if (cNorm.length > 120) continue;
       if (bNorm === cNorm) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
@@ -998,15 +1029,17 @@ export function compareCanonical(
 
 
   // Collect remaining unmatched as missing/added.
-  // Only count field_value and heading items as actual content differences.
-  // Paragraph/list_item items that remain unmatched are structural differences
-  // (titles, footers, headers) that don't represent semantic content changes.
+  // Only report field_value and heading items — paragraphs, list_items, and
+  // table_cells are structural/formatting content that differs across formats
+  // (e.g., titles, metadata lines, footers) and should not be flagged as
+  // content differences. This eliminates false positives from format-specific
+  // structural content while preserving genuine data differences.
   const missingInComparing = Array.from(unmatchedBaseline)
     .map(i => baseline.items[i])
-    .filter(i => i.kind === "field_value" || i.kind === "heading");
+    .filter(item => item.kind === "field_value" || item.kind === "heading");
   const addedInComparing = Array.from(unmatchedComparing)
     .map(i => comparing.items[i])
-    .filter(i => i.kind === "field_value" || i.kind === "heading");
+    .filter(item => item.kind === "field_value" || item.kind === "heading");
 
   return { matched, missingInComparing, addedInComparing };
 }
