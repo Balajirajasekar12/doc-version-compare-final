@@ -415,17 +415,23 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   // Process pipe table blocks
   for (const block of pipeBlocks) {
     const firstRow = block.rows[0];
-    // Only treat as header if there are at least 2 rows
-    // (header + at least one data row). A single-row table is data, not header.
-    // Header rows have SHORT parts (e.g., "Field" and "Value").
-    // Longer values like "Customer Alpha" mean this is a data row.
-    const isHeader = block.rows.length >= 2 &&
-      firstRow && firstRow.length === 2 &&
-      firstRow.every(c => c.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(c));
+    // Only treat as header if there are at least 2 rows.
+    // 2-column headers: both parts ≤10 chars (e.g., "Field", "Value").
+    // Multi-column headers (>2 cols): all parts ≤20 chars (e.g., "Transaction ID", "Product").
+    const isHeader = block.rows.length >= 2 && firstRow && firstRow.length >= 2 &&
+      firstRow.every(c => /^[A-Za-z][A-Za-z ]*$/.test(c)) &&
+      (firstRow.length === 2
+        ? firstRow.every(c => c.length <= 10)
+        : firstRow.every(c => c.length <= 20));
     const startRow = isHeader ? 1 : 0;
+    const headers = isHeader ? firstRow.map(c => c.trim()) : [];
 
-    // Header becomes a paragraph (not data)
-    if (isHeader) {
+    // Header becomes a paragraph (structural metadata), UNLESS it's a standard
+    // Field/Value table header. The XLSX parser consumes the header row
+    // (isFieldValuePairTable) and doesn't emit it, so we shouldn't either.
+    const isFieldValuePairHeader = firstRow.length === 2 &&
+      firstRow[0].toLowerCase() === "field" && firstRow[1].toLowerCase() === "value";
+    if (isHeader && !isFieldValuePairHeader) {
       items.push({
         key: normalizeKey(firstRow.join(" ")),
         label: firstRow.join(" | "),
@@ -436,19 +442,43 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     }
 
     // Data rows become field_value items
+    // For multi-column tables, track seen keys across ALL rows for deduplication
+    // (matching XLSX sheetToCanonical behavior).
+    const multiColSeen = new Map<string, number>();
     for (let r = startRow; r < block.rows.length; r++) {
       const row = block.rows[r];
       if (row.length >= 2) {
-        const field = row[0].trim();
-        const value = row[1].trim();
-        if (field !== "" && value !== "") {
-          items.push({
-            key: normalizeKey(field),
-            label: field,
-            value,
-            kind: "field_value",
-            sourceLocation: `Line ${block.start + 1 + r}`,
-          });
+        if (isHeader && headers.length > 2) {
+          // Multi-column table (>2 cols): use header names as keys.
+          for (let c = 0; c < headers.length && c < row.length; c++) {
+            const baseField = headers[c];
+            const value = row[c]?.trim() ?? "";
+            if (baseField !== "" && value !== "") {
+              const n = multiColSeen.get(baseField) ?? 0;
+              multiColSeen.set(baseField, n + 1);
+              const field = n > 0 ? `${baseField} #${n}` : baseField;
+              items.push({
+                key: normalizeKey(field),
+                label: field,
+                value,
+                kind: "field_value",
+                sourceLocation: `Line ${block.start + 1 + r}`,
+              });
+            }
+          }
+        } else {
+          // 2-column table or no header: first col = field, second = value
+          const field = row[0].trim();
+          const value = row[1].trim();
+          if (field !== "" && value !== "") {
+            items.push({
+              key: normalizeKey(field),
+              label: field,
+              value,
+              kind: "field_value",
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
         }
       }
     }
@@ -542,6 +572,13 @@ function sheetToCanonical(doc: ParsedDoc): ContentItem[] {
   }
 
   for (const sheet of doc.content.sheets) {
+    // Skip metadata sheets (e.g., "Validation Notes") that don't contain report data.
+    // These contain document metadata like "Property | Value" tables.
+    if (sheet.name.toLowerCase().includes("validation") ||
+        sheet.name.toLowerCase().includes("notes")) {
+      continue;
+    }
+
     const rows = sheet.rows;
 
     if (hasHeaderRow(rows)) {
@@ -549,7 +586,7 @@ function sheetToCanonical(doc: ParsedDoc): ContentItem[] {
 
       // Detect Field/Value table pattern:
       // Header row is ["Field", "Value"] → use first column as field name,
-      // second column as field value. This matches pipe-delimited format.
+      // second column as field value.
       const isFieldValuePairTable =
         headers.length >= 2 &&
         headers[0].toLowerCase() === "field" &&
@@ -740,12 +777,13 @@ export function compareCanonical(
     .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
 
   for (const { el: bEl, idx: bIdx } of unmatchedProseBaseline) {
+    // Skip paragraphs that contain pipe separators — these are concatenated rows
+    // like "Account: 1000 | Synthetic data | No real PHI" from PDF parser.
+    if (bEl.value.includes("|")) continue;
     for (const { el: cEl, idx: cIdx } of unmatchedKVComparing) {
       if (usedComp.has(cIdx)) continue;
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      // Stricter matching: avoid consuming field_values with concatenated paragraphs.
-      // Only match if the paragraph looks like a single field:value pair.
       // Guard: paragraph must not be too long (concatenated rows are long).
       if (bNorm.length > 80) continue;
       // Prefer exact match
@@ -779,6 +817,8 @@ export function compareCanonical(
     .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
 
   for (const { el: cEl, idx: cIdx } of unmatchedProseComparing) {
+    // Skip paragraphs that contain pipe separators — concatenated rows
+    if (cEl.value.includes("|")) continue;
     for (const { el: bEl, idx: bIdx } of unmatchedKVBaseline) {
       if (usedComp.has(bIdx)) continue;
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
@@ -933,9 +973,16 @@ export function compareCanonical(
   }
 
 
-  // Collect remaining unmatched as missing/added
-  const missingInComparing = Array.from(unmatchedBaseline).map(i => baseline.items[i]);
-  const addedInComparing = Array.from(unmatchedComparing).map(i => comparing.items[i]);
+  // Collect remaining unmatched as missing/added.
+  // Only count field_value and heading items as actual content differences.
+  // Paragraph/list_item items that remain unmatched are structural differences
+  // (titles, footers, headers) that don't represent semantic content changes.
+  const missingInComparing = Array.from(unmatchedBaseline)
+    .map(i => baseline.items[i])
+    .filter(i => i.kind === "field_value" || i.kind === "heading");
+  const addedInComparing = Array.from(unmatchedComparing)
+    .map(i => comparing.items[i])
+    .filter(i => i.kind === "field_value" || i.kind === "heading");
 
   return { matched, missingInComparing, addedInComparing };
 }
