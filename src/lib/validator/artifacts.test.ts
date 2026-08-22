@@ -543,9 +543,9 @@ describe("Artifact filter does not suppress real differences", () => {
 
 // ── Magic byte detection tests ──────────────────────────────────────────────
 
-describe("Magic byte detection catches misnamed files", () => {
-  it("ZIP file with .rtf extension throws clear error", async () => {
-    // Create a real XLSX (ZIP) file, then try to parse it as RTF
+describe("Magic byte detection auto-detects misnamed files", () => {
+  it("ZIP file with .rtf extension auto-detects as XLSX", async () => {
+    // Create a real XLSX (ZIP) file, then parse as .rtf — should auto-detect
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet([
       ["Field", "Value"],
@@ -555,23 +555,26 @@ describe("Magic byte detection catches misnamed files", () => {
     const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
     const arrayBuffer = new Uint8Array(buf).buffer;
 
-    // Import parseFileBytes dynamically to test the actual parser
     const { parseFileBytes } = await import("./parsers");
-
-    await expect(
-      parseFileBytes("test.rtf", arrayBuffer),
-    ).rejects.toThrow(/ZIP|DOCX|XLSX|extension/i);
+    const result = await parseFileBytes("test.rtf", arrayBuffer);
+    expect(result.ext).toBe("xlsx");
+    expect(result.content.type).toBe("sheet");
   });
 
-  it("PDF file with .docx extension throws clear error", async () => {
+  it("PDF file with .docx extension auto-detects as PDF", async () => {
     // Create a minimal PDF header
     const pdfBytes = new TextEncoder().encode("%PDF-1.4 fake content");
     const arrayBuffer = pdfBytes.buffer;
 
     const { parseFileBytes } = await import("./parsers");
-
-    await expect(
-      parseFileBytes("test.docx", arrayBuffer),
-    ).rejects.toThrow(/PDF|extension/i);
+    try {
+      const result = await parseFileBytes("test.docx", arrayBuffer);
+      expect(result.ext).toBe("pdf");
+    } catch (err) {
+      // If PDF parsing fails on fake content, that's expected —
+      // the key is it tries PDF, not DOCX
+      const msg = (err as Error).message;
+      expect(msg).not.toMatch(/ZIP|DOCX|XLSX|extension/i);
+    }
   });
 });

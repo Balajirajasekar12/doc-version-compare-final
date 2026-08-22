@@ -136,10 +136,10 @@ function parseRtf(arrayBuffer: ArrayBuffer): string[] {
   // Validate magic bytes before decoding
   const magic = detectFormatByMagicBytes(arrayBuffer);
   if (magic === "zip") {
-    throw new Error("This file appears to be a ZIP-based document (DOCX/XLSX) but has an RTF extension. Please rename it with the correct extension.");
+    throw new Error("__MISNAMED_AS_RTF__");
   }
   if (magic === "pdf") {
-    throw new Error("This file appears to be a PDF but has an RTF extension. Please rename it with the correct extension.");
+    throw new Error("__MISNAMED_AS_RTF_PDF__");
   }
   // Decode as windows-1252 — safe for RTF \xhh escapes.
   let text: string;
@@ -399,10 +399,35 @@ export async function parseFileBytes(
     throw new Error(`Unsupported file type: ${fileName}`);
   }
   if (ext === "docx") {
+    // Also handle misnamed files: .docx that is actually PDF/RTF
+    const magic = detectFormatByMagicBytes(arrayBuffer);
+    if (magic === "pdf") {
+      return { ext: "pdf", content: { type: "text", lines: await parsePdf(arrayBuffer) } };
+    }
     return { ext, content: { type: "text", lines: await parseDocx(arrayBuffer) } };
   }
   if (ext === "rtf") {
-    return { ext, content: { type: "text", lines: parseRtf(arrayBuffer) } };
+    try {
+      return { ext, content: { type: "text", lines: parseRtf(arrayBuffer) } };
+    } catch (rtfErr) {
+      const msg = rtfErr instanceof Error ? rtfErr.message : "";
+      // Auto-detect misnamed files: .rtf that is actually DOCX/XLSX/PDF
+      if (msg === "__MISNAMED_AS_RTF__") {
+        const innerMagic = detectFormatByMagicBytes(arrayBuffer);
+        // It's a ZIP — figure out if DOCX or XLSX by checking for word/ inside
+        const bytes = new Uint8Array(arrayBuffer);
+        const asText = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 4096));
+        if (asText.includes("word/")) {
+          return { ext: "docx", content: { type: "text", lines: await parseDocx(arrayBuffer) } };
+        } else {
+          return { ext: "xlsx", content: { type: "sheet", sheets: parseSheet(arrayBuffer, "xlsx") } };
+        }
+      }
+      if (msg === "__MISNAMED_AS_RTF_PDF__") {
+        return { ext: "pdf", content: { type: "text", lines: await parsePdf(arrayBuffer) } };
+      }
+      throw rtfErr; // re-throw real RTF errors
+    }
   }
   if (ext === "pdf") {
     return { ext, content: { type: "text", lines: await parsePdf(arrayBuffer) } };

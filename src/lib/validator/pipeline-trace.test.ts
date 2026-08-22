@@ -159,7 +159,7 @@ describe("Pipeline Trace: Magic byte detection", () => {
     log("STAGE 2", "RTF magic bytes detected", `First 4 bytes: ${bytes[0].toString(16)} ${bytes[1].toString(16)} ${bytes[2].toString(16)} ${bytes[3].toString(16)}`);
   });
 
-  it("ZIP file with .rtf extension throws clear error (NOT garbled output)", async () => {
+  it("ZIP file with .rtf extension auto-detects and parses as XLSX", async () => {
     // Create a real XLSX (ZIP) file
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet([["Account", "1000"]]);
@@ -167,35 +167,30 @@ describe("Pipeline Trace: Magic byte detection", () => {
     const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
     const arrayBuffer = new Uint8Array(buf).buffer;
 
-    // Try to parse as RTF — should throw a clear error
+    // Should auto-detect ZIP content and parse as XLSX, NOT throw
     const { parseFileBytes } = await import("./parsers");
-    try {
-      await parseFileBytes("customer_profile_1000.rtf", arrayBuffer);
-      // Should not reach here
-      expect(false).toBe(true);
-    } catch (err) {
-      const msg = (err as Error).message;
-      log("STAGE 2", "ZIP-as-RTF caught by magic bytes", msg);
-      // Should contain clear message about wrong extension
-      expect(msg).toMatch(/ZIP|DOCX|XLSX|extension/i);
-      // Should NOT produce garbled output
-      expect(msg).not.toContain("PK");
-      expect(msg).not.toContain("word/document.xml");
-    }
+    const result = await parseFileBytes("customer_profile_1000.rtf", arrayBuffer);
+    log("STAGE 2", "ZIP-as-RTF auto-detected as XLSX", `ext=${result.ext}, sheets=${result.content.type === 'sheet' ? result.content.sheets.length : 0}`);
+    expect(result.ext).toBe("xlsx");
+    expect(result.content.type).toBe("sheet");
   });
 
-  it("PDF file with .docx extension throws clear error", async () => {
+  it("PDF file with .docx extension auto-detects and parses as PDF", async () => {
     const pdfBytes = new TextEncoder().encode("%PDF-1.4 fake PDF content");
     const arrayBuffer = pdfBytes.buffer;
 
+    // Should auto-detect PDF content and parse as PDF, NOT throw
     const { parseFileBytes } = await import("./parsers");
     try {
-      await parseFileBytes("report.docx", arrayBuffer);
-      expect(false).toBe(true);
+      const result = await parseFileBytes("report.docx", arrayBuffer);
+      log("STAGE 2", "PDF-as-DOCX auto-detected", `ext=${result.ext}`);
+      expect(result.ext).toBe("pdf");
     } catch (err) {
+      // If PDF parsing fails on fake content, that's OK — the point is
+      // it should try to parse as PDF, not throw a format mismatch error
       const msg = (err as Error).message;
-      log("STAGE 2", "PDF-as-DOCX caught by magic bytes", msg);
-      expect(msg).toMatch(/PDF|extension/i);
+      log("STAGE 2", "PDF-as-DOCX attempted PDF parse", msg);
+      expect(msg).not.toMatch(/ZIP|DOCX|XLSX|extension/i);
     }
   });
 });

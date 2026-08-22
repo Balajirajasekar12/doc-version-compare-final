@@ -493,10 +493,43 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     }
   }
 
-  // Process remaining lines (not in pipe tables)
+  // Pre-process: join colon-terminated lines with their following line.
+  // PDF parser splits "Sort Description: Product/Sub Group-8 Digit" into
+  // two lines: "Sort Description:" and "Product/Sub Group-8 Digit" because
+  // they're at different X positions. Join them back together.
+  const joinedLines: string[] = [];
   for (let i = 0; i < lines.length; i++) {
-    if (pipeTableLines.has(i)) continue;
     const trimmed = lines[i].trim();
+    if (trimmed === "" || pipeTableLines.has(i)) {
+      joinedLines.push(lines[i]);
+      continue;
+    }
+    // If line ends with just a colon and next non-empty line exists,
+    // join them with ": " to form a single field:value line.
+    if (/^[A-Za-z][A-Za-z ]*:$/.test(trimmed)) {
+      // Find next non-empty, non-pipe line
+      let j = i + 1;
+      while (j < lines.length && (lines[j].trim() === "" || pipeTableLines.has(j))) j++;
+      if (j < lines.length) {
+        const nextTrimmed = lines[j].trim();
+        // Only join if next line is NOT another colon-terminated line
+        // and NOT a pipe line and NOT a table separator
+        if (nextTrimmed !== "" && !/^[A-Za-z][A-Za-z ]*:$/i.test(nextTrimmed) &&
+            !nextTrimmed.includes("|") && !/^[-+:]+$/.test(nextTrimmed)) {
+          joinedLines.push(trimmed + " " + nextTrimmed);
+          // Skip the joined line
+          i = j;
+          continue;
+        }
+      }
+    }
+    joinedLines.push(lines[i]);
+  }
+
+  // Process remaining lines (not in pipe tables)
+  for (let i = 0; i < joinedLines.length; i++) {
+    if (pipeTableLines.has(i)) continue;
+    const trimmed = joinedLines[i].trim();
     if (trimmed === "") continue;
     if (/^[|\-+:]+$/.test(trimmed)) continue; // table separator
 
@@ -506,7 +539,7 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
       // Check if this line appears immediately before a pipe table block.
       // If so, it's likely report metadata (e.g., "Account: 1000") that
       // identifies the report, not actual data. Treat as paragraph.
-      const nextNonEmpty = lines.findIndex((l, j) => j > i && l.trim() !== "" && pipeTableLines.has(j));
+      const nextNonEmpty = joinedLines.findIndex((l, j) => j > i && l.trim() !== "" && pipeTableLines.has(j));
       const isBeforeTable = nextNonEmpty === i + 1 || (nextNonEmpty > i && nextNonEmpty - i <= 2);
       
       // Also check: if the value matches a pure number/ID pattern and
