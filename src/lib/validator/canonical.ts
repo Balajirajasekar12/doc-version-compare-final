@@ -1029,17 +1029,65 @@ export function compareCanonical(
 
 
   // Collect remaining unmatched as missing/added.
-  // Only report field_value and heading items — paragraphs, list_items, and
-  // table_cells are structural/formatting content that differs across formats
-  // (e.g., titles, metadata lines, footers) and should not be flagged as
-  // content differences. This eliminates false positives from format-specific
-  // structural content while preserving genuine data differences.
-  const missingInComparing = Array.from(unmatchedBaseline)
-    .map(i => baseline.items[i])
-    .filter(item => item.kind === "field_value" || item.kind === "heading");
-  const addedInComparing = Array.from(unmatchedComparing)
-    .map(i => comparing.items[i])
-    .filter(item => item.kind === "field_value" || item.kind === "heading");
+  // Report ALL unmatched items (not just field_value/heading) so that genuine
+  // content differences like "Created for cross-format comparison testing." are
+  // not hidden. However, suppress paragraphs/list_items whose content is already
+  // represented by a matched item — these are false duplicates from the same
+  // data being expressed differently across formats.
+  const allUnmatchedBaseline = Array.from(unmatchedBaseline).map(i => baseline.items[i]);
+  const allUnmatchedComparing = Array.from(unmatchedComparing).map(i => comparing.items[i]);
+
+  // Build a set of normalized values that are already covered by matched items
+  const matchedValues = new Set<string>();
+  const matchedKeys = new Set<string>();
+  for (const m of matched) {
+    matchedValues.add(normalizeValue(m.baseline.value, mode).toLowerCase());
+    matchedValues.add(normalizeValue(m.comparing.value, mode).toLowerCase());
+    matchedKeys.add(m.baseline.key);
+    matchedKeys.add(m.comparing.key);
+  }
+
+  // A paragraph/list_item is "already represented" if:
+  // 1. Its value matches a matched item's value (same data, different format)
+  // 2. Its key matches a matched item's key AND its value is a substring
+  //    or superstring of the matched value (e.g., "Account: 1001" matches
+  //    field_value key="account" value="1001")
+  // Build a set of normalized labels from matched items
+  const matchedLabels = new Set<string>();
+  for (const m of matched) {
+    matchedLabels.add(normalizeValue(m.baseline.label, mode).toLowerCase());
+    matchedLabels.add(normalizeValue(m.comparing.label, mode).toLowerCase());
+  }
+
+  function isAlreadyRepresented(item: ContentItem): boolean {
+    if (item.kind !== "paragraph" && item.kind !== "list_item" && item.kind !== "table_cell") {
+      return false; // Always report field_value and heading items
+    }
+    const itemVal = normalizeValue(item.value, mode).toLowerCase();
+    const itemKey = item.key;
+
+    // Check 1: exact value match with any matched item
+    if (matchedValues.has(itemVal)) return true;
+
+    // Check 2: key match + value containment (e.g., "Account: 1001" contains "1001")
+    if (matchedKeys.has(itemKey)) {
+      for (const m of matched) {
+        const mBaseVal = normalizeValue(m.baseline.value, mode).toLowerCase();
+        const mCompVal = normalizeValue(m.comparing.value, mode).toLowerCase();
+        if (mBaseVal.length > 0 && itemVal.includes(mBaseVal) && mBaseVal.length >= 3) return true;
+        if (mCompVal.length > 0 && itemVal.includes(mCompVal) && mCompVal.length >= 3) return true;
+      }
+    }
+
+    // Check 3: value matches a matched item's label (e.g., standalone "Account"
+    // paragraph matches field_value label "Account")
+    if (matchedLabels.has(itemVal)) return true;
+
+    return false;
+  }
+
+  const missingInComparing = allUnmatchedBaseline.filter(item => !isAlreadyRepresented(item));
+  const addedInComparing = allUnmatchedComparing.filter(item => !isAlreadyRepresented(item));
 
   return { matched, missingInComparing, addedInComparing };
 }
