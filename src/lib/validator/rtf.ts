@@ -210,7 +210,7 @@ function readControl(ctx: Ctx): void {
 
   if (word === "bin" && param !== undefined) {
     // \binN — skip N bytes of binary data.
-    const bytesToSkip = Math.max(0, param);
+    const bytesToSkip = Math.min(Math.max(0, param), s.length - ctx.i);
     ctx.i += bytesToSkip;
     return;
   }
@@ -234,56 +234,62 @@ export function rtfToText(rtf: string): string {
   const ctx: Ctx = { s: rtf, i: 0, out: "", skipDepth: 0, groupDepth: 0 };
   // Track which group depths are being skipped (by groupDepth at '{' time).
   const skipStack: number[] = [];
+  const len = ctx.s.length;
 
-  while (ctx.i < ctx.s.length) {
-    const ch = ctx.s[ctx.i];
-    if (ch === "{") {
-      ctx.groupDepth++;
-      ctx.i++;
-      // Peek ahead: is this a skipped destination or a \* destination?
-      let j = ctx.i;
-      let isSkipped = false;
-      if (ctx.s[j] === "\\") {
-        j++;
-        let isStar = false;
-        if (ctx.s[j] === "*") {
-          isStar = true;
+  try {
+    while (ctx.i < len) {
+      const ch = ctx.s[ctx.i];
+      if (ch === "{") {
+        ctx.groupDepth++;
+        ctx.i++;
+        // Peek ahead: is this a skipped destination or a \* destination?
+        let j = ctx.i;
+        let isSkipped = false;
+        if (j < len && ctx.s[j] === "\\") {
           j++;
+          let isStar = false;
+          if (j < len && ctx.s[j] === "*") {
+            isStar = true;
+            j++;
+          }
+          let word = "";
+          while (j < len && /[a-zA-Z]/.test(ctx.s[j])) {
+            word += ctx.s[j];
+            j++;
+          }
+          if (isStar || SKIP_DESTINATIONS.has(word.toLowerCase())) {
+            isSkipped = true;
+          }
         }
-        let word = "";
-        while (j < ctx.s.length && /[a-zA-Z]/.test(ctx.s[j])) {
-          word += ctx.s[j];
-          j++;
+        if (isSkipped) {
+          ctx.skipDepth++;
+          skipStack.push(ctx.groupDepth);
         }
-        if (isStar || SKIP_DESTINATIONS.has(word.toLowerCase())) {
-          isSkipped = true;
+        continue;
+      }
+      if (ch === "}") {
+        if (skipStack.length > 0 && skipStack[skipStack.length - 1] === ctx.groupDepth) {
+          ctx.skipDepth = Math.max(0, ctx.skipDepth - 1);
+          skipStack.pop();
         }
+        ctx.groupDepth--;
+        ctx.i++;
+        continue;
       }
-      if (isSkipped) {
-        ctx.skipDepth++;
-        skipStack.push(ctx.groupDepth);
+      if (ch === "\\") {
+        ctx.i++;
+        readControl(ctx);
+        continue;
       }
-      continue;
-    }
-    if (ch === "}") {
-      if (skipStack.length > 0 && skipStack[skipStack.length - 1] === ctx.groupDepth) {
-        ctx.skipDepth = Math.max(0, ctx.skipDepth - 1);
-        skipStack.pop();
+      // Regular character.
+      if (ctx.skipDepth === 0) {
+        ctx.out += ch;
       }
-      ctx.groupDepth--;
       ctx.i++;
-      continue;
     }
-    if (ch === "\\") {
-      ctx.i++;
-      readControl(ctx);
-      continue;
-    }
-    // Regular character.
-    if (ctx.skipDepth === 0) {
-      ctx.out += ch;
-    }
-    ctx.i++;
+  } catch (_e) {
+    // If parsing crashes (e.g., malformed RTF, out-of-bounds), return
+    // whatever text was extracted so far rather than throwing.
   }
 
   // Collapse 3+ blank lines and trim stray leading/trailing whitespace lines.

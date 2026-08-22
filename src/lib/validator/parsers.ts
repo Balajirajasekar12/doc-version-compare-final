@@ -133,7 +133,7 @@ async function parseDocx(arrayBuffer: ArrayBuffer): Promise<string[]> {
 }
 
 function parseRtf(arrayBuffer: ArrayBuffer): string[] {
-  // Validate RTF magic bytes before decoding
+  // Validate magic bytes before decoding
   const magic = detectFormatByMagicBytes(arrayBuffer);
   if (magic === "zip") {
     throw new Error("This file appears to be a ZIP-based document (DOCX/XLSX) but has an RTF extension. Please rename it with the correct extension.");
@@ -141,21 +141,46 @@ function parseRtf(arrayBuffer: ArrayBuffer): string[] {
   if (magic === "pdf") {
     throw new Error("This file appears to be a PDF but has an RTF extension. Please rename it with the correct extension.");
   }
-  // RTF is ASCII + \'hh escapes; decoding as windows-1252 is safe and
-  // preserves the escape bytes exactly.
+  // Decode as windows-1252 — safe for RTF \xhh escapes.
   let text: string;
   try {
     text = new TextDecoder("windows-1252").decode(arrayBuffer);
-  } catch (decodeErr) {
-    throw new Error("Unable to decode RTF file: " + (decodeErr instanceof Error ? decodeErr.message : String(decodeErr)));
+  } catch (_e) {
+    try {
+      text = new TextDecoder("utf-8").decode(arrayBuffer);
+    } catch (_e2) {
+      throw new Error("Unable to decode RTF file content");
+    }
   }
+  // Strip BOM (UTF-8 EF BB BF or UTF-16 BOM) if present before the RTF header.
+  text = text.replace(/^\ufeff/, "");
+  // If the file doesn't start with {\rtf, try to find the RTF header
+  // and skip any preamble bytes.
+  if (!text.trimStart().startsWith("{\\rtf")) {
+    const rtfStart = text.indexOf("{\\rtf");
+    if (rtfStart > 0 && rtfStart < 100) {
+      text = text.substring(rtfStart);
+    } else if (rtfStart < 0) {
+      // No RTF header found at all — treat as plain text
+      return filterArtifacts(splitLines(text));
+    }
+  }
+  // rtfToText is designed to never throw (catches internally),
+  // but guard against any unexpected error.
   let plain: string;
   try {
     plain = rtfToText(text);
-  } catch (rtfErr) {
-    throw new Error("Unable to parse RTF content: " + (rtfErr instanceof Error ? rtfErr.message : String(rtfErr)));
+  } catch (_e) {
+    // Best-effort: strip RTF control words from raw text as fallback
+    plain = text.replace(/\\[a-zA-Z]+\d*\s?/g, "").replace(/\{[^}]*\}/g, "");
   }
-  return filterArtifacts(splitLines(plain));
+  const lines = splitLines(plain);
+  if (lines.length === 0 && arrayBuffer.byteLength > 0) {
+    // If RTF parsing yielded nothing, try reading as plain text
+    const raw = new TextDecoder("utf-8", { fatal: false }).decode(arrayBuffer);
+    return filterArtifacts(splitLines(raw));
+  }
+  return filterArtifacts(lines);
 }
 
 function parseSheet(arrayBuffer: ArrayBuffer, ext: "xlsx" | "xls" | "csv"): SheetData[] {
