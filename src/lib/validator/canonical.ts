@@ -1331,9 +1331,24 @@ export function compareCanonical(
   );
 
   const missingInComparing = allUnmatchedBaseline.filter(item => {
-    if (item.kind === "field_value" || item.kind === "heading") return true;
-    // Check if this paragraph's content exists anywhere in the comparing doc
     const normalized = normalizeValue(item.value, mode).toLowerCase();
+    const itemKey = item.key;
+
+    if (item.kind === "field_value" || item.kind === "heading") {
+      // Check if this field_value's VALUE or KEY exists in the comparing doc.
+      // This prevents false positives when the same data is represented as
+      // different item types across formats (e.g., PDF field_value vs DOCX paragraph).
+      if (normalized.length >= 3 && allComparingValues.has(normalized)) return false;
+      // Check if the key (normalized label) matches a comparing item's key
+      const allComparingKeys = new Set(comparing.items.map(i => i.key));
+      if (allComparingKeys.has(itemKey)) return false;
+      // Check substring containment in either direction
+      for (const cv of allComparingValues) {
+        if (cv.length >= 3 && (normalized.includes(cv) || cv.includes(normalized))) return false;
+      }
+      return true; // Genuine field_value difference
+    }
+    // Check if this paragraph's content exists anywhere in the comparing doc
     if (allComparingValues.has(normalized)) return false; // exact match, not a difference
     // Short paragraphs are structural — suppress
     if (item.value.length < 30) return false;
@@ -1346,8 +1361,19 @@ export function compareCanonical(
     return !isAlreadyRepresented(item);
   });
   const addedInComparing = allUnmatchedComparing.filter(item => {
-    if (item.kind === "field_value" || item.kind === "heading") return true;
     const normalized = normalizeValue(item.value, mode).toLowerCase();
+    const itemKey = item.key;
+
+    if (item.kind === "field_value" || item.kind === "heading") {
+      if (normalized.length >= 3 && allBaselineValues.has(normalized)) return false;
+      const allBaselineKeys = new Set(baseline.items.map(i => i.key));
+      if (allBaselineKeys.has(itemKey)) return false;
+      for (const bv of allBaselineValues) {
+        if (bv.length >= 3 && (normalized.includes(bv) || bv.includes(normalized))) return false;
+      }
+      return true;
+    }
+    // Non-field_value items: check if content exists in baseline
     if (allBaselineValues.has(normalized)) return false;
     if (item.value.length < 30) return false;
     for (const bv of allBaselineValues) {
