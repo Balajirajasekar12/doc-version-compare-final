@@ -998,6 +998,15 @@ export function compareCanonical(
         usedComp.add(cIdx);
         break;
       }
+      // Also match if paragraph is just the field KEY (e.g., standalone "Customer"
+      // paragraph matches field_value key="customer" value="Customer Alpha")
+      if (keyInPara && paraNorm === cEl.key) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
     }
   }
 
@@ -1018,6 +1027,15 @@ export function compareCanonical(
       const paraNorm = normalizeValue(cEl.value, mode).toLowerCase();
       const valNorm = normalizeValue(bEl.value, mode).toLowerCase();
       if (valNorm.length > 0 && paraNorm.endsWith(valNorm)) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+      // Also match if paragraph is just the field KEY
+      const keyInPara = paraNorm.includes(bEl.key) || paraNorm.includes(normalizeKey(bEl.label));
+      if (keyInPara && paraNorm === bEl.key) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -1070,12 +1088,14 @@ export function compareCanonical(
     if (matchedValues.has(itemVal)) return true;
 
     // Check 2: value containment — paragraph contains a matched value
-    // (e.g., "Account: 1000 | Synthetic data" contains matched value "1000")
+    // ONLY suppress if the paragraph is SHORT and the matched value is a
+    // significant portion of it. This prevents suppressing genuine content
+    // differences like "Sort Description: Product/Sub Group-8 Digit".
     for (const m of matched) {
       const mBaseVal = normalizeValue(m.baseline.value, mode).toLowerCase();
       const mCompVal = normalizeValue(m.comparing.value, mode).toLowerCase();
-      if (mBaseVal.length >= 3 && itemVal.includes(mBaseVal) && itemVal.length > mBaseVal.length) return true;
-      if (mCompVal.length >= 3 && itemVal.includes(mCompVal) && itemVal.length > mCompVal.length) return true;
+      if (mBaseVal.length >= 3 && itemVal.includes(mBaseVal) && itemVal.length > mBaseVal.length && itemVal.length < 60) return true;
+      if (mCompVal.length >= 3 && itemVal.includes(mCompVal) && itemVal.length > mCompVal.length && itemVal.length < 60) return true;
     }
 
     // Check 3: value matches a matched item's label (e.g., standalone "Account"
@@ -1083,41 +1103,38 @@ export function compareCanonical(
     if (matchedLabels.has(itemVal)) return true;
 
     // Check 4: suppress structural/formatting content that differs between
-    // formats but isn't actual data. These are format-specific artifacts:
-    // titles, footers, metadata lines, table headers.
-    // IMPORTANT: only suppress if the paragraph is SHORT (< 60 chars).
-    // Longer paragraphs like "Created for cross-format comparison testing."
-    // are genuine content differences and must NOT be suppressed.
-    if (item.value.length < 60) {
-      // Short title: "Customer Profile", "Sales Summary", etc.
-      // (≤5 words, title-case, no digits, no pipes/colons)
-      const words = item.value.trim().split(/\s+/);
-      if (words.length <= 5 &&
-          /^[A-Z][a-z]/.test(item.value) &&
-          !/\d/.test(item.value) &&
-          !/[|:]/.test(item.value) &&
-          item.value.length < 40) {
-        return true;
-      }
-      // Footer with boilerplate words: "Synthetic data - no real PHI."
-      if (/synthetic|no real|\bph\b|\bphi\b/i.test(item.value)) {
-        return true;
-      }
-      // Standalone short word that's a field label, key, or appears in any matched label
-      if (words.length === 1) {
-        const w = words[0].toLowerCase();
-        if (matchedLabels.has(w) || matchedKeys.has(w)) return true;
-        for (const ml of matchedLabels) {
-          if (ml.split(/\s+/).includes(w)) return true;
-        }
-      }
-      // Table header with pipe separators: "Transaction ID | Product | ..."
-      if (item.value.includes("|") && words.length >= 3) {
-        return true;
-      }
-      // Standalone numeric value (e.g., "1000" from "Account: 1000" metadata)
-      if (/^\d[\d,.-]*$/.test(item.value.trim()) && item.value.trim().length <= 20) {
-        return true;
+    // formats but isn't actual data — titles, footers, metadata, headers.
+    const words = item.value.trim().split(/\s+/);
+
+    // Footer with boilerplate: "Synthetic data - no real PHI."
+    if (/synthetic|no real|\bph\b|\bphi\b/i.test(item.value)) {
+      return true;
+    }
+    // Pipe-separated table header: "Transaction ID | Product | ..."
+    if (item.value.includes("|") && words.length >= 3) {
+      return true;
+    }
+    // Pipe-separated metadata line: "Account: 1000 | Synthetic data | No real PHI"
+    if (item.value.includes("|") && item.value.includes(":")) {
+      return true;
+    }
+    // Standalone numeric value (e.g., "1000" from metadata)
+    if (/^[\d,.-]+$/.test(item.value.trim()) && item.value.trim().length <= 20) {
+      return true;
+    }
+    // Short title (≤5 words, ≤40 chars, title-case, no digits, no pipes/colons)
+    if (item.value.length <= 40 && words.length <= 5 &&
+        /^[A-Z][a-z]/.test(item.value) &&
+        !/\d/.test(item.value) &&
+        !/[|:]/.test(item.value)) {
+      return true;
+    }
+    // Standalone short word that's a field label or appears in a matched label
+    if (words.length === 1 && words[0].length <= 15) {
+      const w = words[0].toLowerCase();
+      if (matchedLabels.has(w) || matchedKeys.has(w)) return true;
+      for (const ml of matchedLabels) {
+        if (ml.split(/\s+/).includes(w)) return true;
       }
     }
 

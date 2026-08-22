@@ -31,6 +31,57 @@ const SKIP_DESTINATIONS = new Set([
   "colorschememapping",
   "liststylename",
   "fldinst",
+  "fldrslt",
+  "bkmkstart",
+  "bkmkend",
+  "header",
+  "footer",
+  "footnote",
+  "annotref",
+  "xe",
+  "tc",
+  "shppict",
+  "pncmd",
+  "pnseclvl",
+  "pn",
+  "pnseclvl",
+  "pnalpha",
+  "pndec",
+  "pnucrm",
+  "pnstart",
+  "pnindent",
+  "pntxtb",
+  "pntxta",
+  "atrfstart",
+  "atrfend",
+  "chpgn",
+  "chftn",
+  "chatn",
+  "chdate",
+  "chtime",
+  "chdpl",
+  "chdpa",
+  "page",
+  "par",
+  "sect",
+  "titlepg",
+  "headery",
+  "footery",
+  "margl",
+  "margr",
+  "margt",
+  "margb",
+  "gutter",
+  "paperw",
+  "paperh",
+  "landscape",
+  "facingp",
+  "twocolumn",
+  "titlepage",
+  "deftab",
+  "widowctrl",
+  "makeatletter",
+  "makeatother",
 ]);
 
 // cp1252 high-byte map (the de-facto encoding for Word-produced RTF).
@@ -154,6 +205,13 @@ function readControl(ctx: Ctx): void {
       }
       ctx.i += 2;
     }
+    return;
+  }
+
+  if (word === "bin" && param !== undefined) {
+    // \binN — skip N bytes of binary data.
+    const bytesToSkip = Math.max(0, param);
+    ctx.i += bytesToSkip;
     return;
   }
 
