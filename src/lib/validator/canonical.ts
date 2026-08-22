@@ -258,7 +258,7 @@ function normalizeCellLines(inputLines: string[]): string[] {
   // Strategy: detect when line N is all-labels and line N+1 is all-values
   // with matching column counts, then emit them as pipe-delimited pairs.
   const isLabelSeg = (s: string) =>
-    /^[A-Za-z][A-Za-z]*([ ][A-Za-z]+)*$/.test(s) && s.length >= 2 && s.length <= 30;
+    /^[A-Za-z][A-Za-z]*([ ][A-Za-z]+)*$/.test(s) && s.length >= 2 && s.length <= 50;
   const hasNonLabel = (segs: string[]) => segs.some(s => !isLabelSeg(s));
   const tabProcessed: string[] = [];
   let skipNext = false;
@@ -272,16 +272,27 @@ function normalizeCellLines(inputLines: string[]): string[] {
         // Check if next line has same column count with tabs AND has non-labels (values).
         // Only pair multi-column lines (3+ labels) — 2-column lines like
         // "Status\tActive" are independent field/value pairs, not paired columns.
-        if (allLabels && segs.length >= 3 && li + 1 < inputLines.length) {
+        if (allLabels && segs.length >= 2 && li + 1 < inputLines.length) {
           const nextTrimmed = inputLines[li + 1].trim();
           if (nextTrimmed.includes("\t")) {
             const nextSegs = nextTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
             if (nextSegs.length === segs.length && hasNonLabel(nextSegs)) {
-              // Paired label/value lines — emit as pipe-delimited pairs
-              for (let c = 0; c < segs.length; c++) {
-                tabProcessed.push(`${segs[c]} | ${nextSegs[c]}`);
+              // Found a header row followed by a data row.
+              // Emit header as a single pipe-delimited line (multi-column).
+              tabProcessed.push(segs.join(" | "));
+              // Also consume subsequent data rows that have the same column count.
+              // This handles tables with 1 header + N data rows.
+              let dataIdx = li + 1;
+              while (dataIdx < inputLines.length) {
+                const dataTrimmed = inputLines[dataIdx].trim();
+                if (!dataTrimmed.includes("\t")) break;
+                const dataSegs = dataTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
+                if (dataSegs.length !== segs.length) break;
+                tabProcessed.push(dataSegs.join(" | "));
+                dataIdx++;
               }
-              skipNext = true;
+              // Skip all consumed lines
+              li = dataIdx - 1; // -1 because for loop will increment
               continue;
             }
           }
@@ -294,10 +305,12 @@ function normalizeCellLines(inputLines: string[]): string[] {
   const result: string[] = [];
   let i = 0;
 
-  // A "key" line is short, alpha words separated by single spaces, no colon/pipe.
-  // Allows "Account Manager" but NOT "Customer    Customer Alpha" (multi-space).
+  // A "key" line is a short alpha phrase (label/field name), no colon/pipe.
+  // Keys are SHORT labels like "Client Number", "Status", "Region".
+  // Longer alpha phrases like "Borough Of Ridgway" (19 chars) are VALUES, not keys.
+  // This distinction is critical for alternating KV detection.
   function isKey(s: string): boolean {
-    return s.length > 0 && s.length < 30 &&
+    return s.length > 0 && s.length <= 20 &&
       /^[A-Za-z][A-Za-z]*(?: [A-Za-z]+)*$/.test(s) &&
       !s.includes(":") && !s.includes("|");
   }
@@ -347,6 +360,10 @@ function normalizeCellLines(inputLines: string[]): string[] {
       //   "Bill Account Number"
       //   "0165431006"
       // We require at least 2 consecutive key-value pairs to avoid false matches.
+      // We require !isKey(valueLine) to prevent pairing two key-like lines.
+      // Values like "016543" or "Borough Of Ridgway" (>20 chars) fail isKey,
+      // allowing the pairing. But short alpha like "Field" or "Value" pass isKey,
+      // preventing false pairing with preceding key-like lines.
       if (!isKey(nextTrimmed) && isValue(nextTrimmed)) {
         // Peek ahead: need at least one more key-value pair after this
         const peekIdx = i + 2;
@@ -627,13 +644,15 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     }
 
     // Only treat as header if there are at least 2 rows.
-    // 2-column headers: both parts ≤10 chars (e.g., "Field", "Value").
-    // Multi-column headers (>2 cols): all parts ≤20 chars (e.g., "Transaction ID", "Product").
+    // All cells must be alpha-only (no digits, no special chars).
+    // 2-column headers: both parts ≤12 chars (e.g., "Field", "Value").
+    // Multi-column headers (>2 cols): all parts ≤50 chars.
+    // The alpha-only check is sufficient to distinguish headers from data.
     const isHeader = block.rows.length >= 2 && firstRow && firstRow.length >= 2 &&
       firstRow.every(c => /^[A-Za-z][A-Za-z ]*$/.test(c)) &&
       (firstRow.length === 2
-        ? firstRow.every(c => c.length <= 8)
-        : firstRow.every(c => c.length <= 20));
+        ? firstRow.every(c => c.length <= 12)
+        : firstRow.every(c => c.length <= 50));
     const startRow = isHeader ? 1 : 0;
     const headers = isHeader ? firstRow.map(c => c.trim()) : [];
 
