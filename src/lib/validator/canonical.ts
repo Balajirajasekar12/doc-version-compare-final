@@ -995,7 +995,7 @@ export function compareCanonical(
       const keyInParagraph = bNorm.includes(cEl.key) || bNorm.includes(normalizeKey(cEl.label)) ||
         bNorm.replace(/:\s*$/, "").trim() === cEl.key ||
         bNorm.replace(/:\s*$/, "").trim() === normalizeKey(cEl.label);
-      if (keyInParagraph && bNorm.length < 80) {
+      if (keyInParagraph && bNorm.length < 200) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -1060,7 +1060,7 @@ export function compareCanonical(
       const cNormStripped = cNorm.replace(/:\s*$/, "").trim();
       const keyInParagraph = cNorm.includes(bEl.key) || cNorm.includes(normalizeKey(bEl.label)) ||
         cNormStripped === bEl.key || cNormStripped === normalizeKey(bEl.label);
-      if (keyInParagraph && cNorm.length < 80) {
+      if (keyInParagraph && cNorm.length < 200) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
