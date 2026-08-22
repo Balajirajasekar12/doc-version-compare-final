@@ -109,7 +109,8 @@ export function normalizeValue(value: string, mode: ComparisonMode): string {
  */
 function extractFieldValuesFromText(text: string): Array<{ field: string; value: string }> {
   const pairs: Array<{ field: string; value: string }> = [];
-  const trimmed = text.trim();
+  // Convert tabs to pipes for consistent handling
+  const trimmed = text.trim().replace(/\t/g, " | ");
 
   // Helper: extract a single segment using colon/equals/space patterns
   function extractFromSegment(segment: string): { field: string; value: string } | null {
@@ -249,6 +250,47 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
  * Converts "Field\nValue\nAccount\n1001" → ["Field | Value", "Account | 1001"]
  */
 function normalizeCellLines(inputLines: string[]): string[] {
+  // PRE-PROCESS: Handle RTF tab-separated multi-column content.
+  // RTF produces lines like:
+  //   "Client Number\t\t\tClient Name\t\t\tInvoice Number" (all labels)
+  //   "016543\t\t\tBorough of Ridgway\t260804584270" (all values)
+  // These are TWO lines that together form paired field/value columns.
+  // Strategy: detect when line N is all-labels and line N+1 is all-values
+  // with matching column counts, then emit them as pipe-delimited pairs.
+  const isLabelSeg = (s: string) =>
+    /^[A-Za-z][A-Za-z]*([ ][A-Za-z]+)*$/.test(s) && s.length >= 2 && s.length <= 30;
+  const hasNonLabel = (segs: string[]) => segs.some(s => !isLabelSeg(s));
+  const tabProcessed: string[] = [];
+  let skipNext = false;
+  for (let li = 0; li < inputLines.length; li++) {
+    if (skipNext) { skipNext = false; continue; }
+    const trimmed = inputLines[li].trim();
+    if (trimmed.includes("\t")) {
+      const segs = trimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
+      if (segs.length >= 2) {
+        const allLabels = segs.every(isLabelSeg);
+        // Check if next line has same column count with tabs AND has non-labels (values).
+        // Only pair multi-column lines (3+ labels) — 2-column lines like
+        // "Status\tActive" are independent field/value pairs, not paired columns.
+        if (allLabels && segs.length >= 3 && li + 1 < inputLines.length) {
+          const nextTrimmed = inputLines[li + 1].trim();
+          if (nextTrimmed.includes("\t")) {
+            const nextSegs = nextTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
+            if (nextSegs.length === segs.length && hasNonLabel(nextSegs)) {
+              // Paired label/value lines — emit as pipe-delimited pairs
+              for (let c = 0; c < segs.length; c++) {
+                tabProcessed.push(`${segs[c]} | ${nextSegs[c]}`);
+              }
+              skipNext = true;
+              continue;
+            }
+          }
+        }
+      }
+    }
+    tabProcessed.push(inputLines[li]);
+  }
+
   const result: string[] = [];
   let i = 0;
 
@@ -292,11 +334,11 @@ function normalizeCellLines(inputLines: string[]): string[] {
     return null;
   }
 
-  while (i < inputLines.length) {
-    const trimmed = inputLines[i].trim();
+  while (i < tabProcessed.length) {
+    const trimmed = tabProcessed[i].trim();
 
-    if (i + 1 < inputLines.length && isKey(trimmed)) {
-      const nextTrimmed = inputLines[i + 1].trim();
+    if (i + 1 < tabProcessed.length && isKey(trimmed)) {
+      const nextTrimmed = tabProcessed[i + 1].trim();
 
       // Pattern A: Alternating key-value (key on line N, value on line N+1).
       // This handles RTF/DOCX where fields appear as separate lines:
@@ -308,16 +350,16 @@ function normalizeCellLines(inputLines: string[]): string[] {
       if (!isKey(nextTrimmed) && isValue(nextTrimmed)) {
         // Peek ahead: need at least one more key-value pair after this
         const peekIdx = i + 2;
-        if (peekIdx + 1 < inputLines.length) {
-          const peekKey = inputLines[peekIdx].trim();
-          const peekVal = inputLines[peekIdx + 1].trim();
+        if (peekIdx + 1 < tabProcessed.length) {
+          const peekKey = tabProcessed[peekIdx].trim();
+          const peekVal = tabProcessed[peekIdx + 1].trim();
           if (isKey(peekKey) && !isKey(peekVal) && isValue(peekVal)) {
             // Found at least 2 consecutive key-value pairs — collect them all
             const pairs: string[] = [`${trimmed} | ${nextTrimmed}`];
             let rowIdx = i + 2;
-            while (rowIdx + 1 < inputLines.length) {
-              const k = inputLines[rowIdx].trim();
-              const v = inputLines[rowIdx + 1].trim();
+            while (rowIdx + 1 < tabProcessed.length) {
+              const k = tabProcessed[rowIdx].trim();
+              const v = tabProcessed[rowIdx + 1].trim();
               if (k === "" || v === "") break;
               if (!isKey(k) || !isValue(v)) break;
               pairs.push(`${k} | ${v}`);
@@ -345,9 +387,9 @@ function normalizeCellLines(inputLines: string[]): string[] {
           let isTable = true;
           let rowIdx = i + 2;
           let rowCount = 0;
-          while (rowIdx + 1 < inputLines.length) {
-            const k = inputLines[rowIdx].trim();
-            const v = inputLines[rowIdx + 1].trim();
+          while (rowIdx + 1 < tabProcessed.length) {
+            const k = tabProcessed[rowIdx].trim();
+            const v = tabProcessed[rowIdx + 1].trim();
             if (k === "" || v === "") { isTable = false; break; }
             if (!isKey(k) || !isValue(v)) { isTable = false; break; }
             rowCount++;
@@ -357,9 +399,9 @@ function normalizeCellLines(inputLines: string[]): string[] {
           if (rowCount >= 1 && isTable) {
             result.push(`${trimmed} | ${nextTrimmed}`);
             rowIdx = i + 2;
-            while (rowIdx + 1 < inputLines.length) {
-              const k = inputLines[rowIdx].trim();
-              const v = inputLines[rowIdx + 1].trim();
+            while (rowIdx + 1 < tabProcessed.length) {
+              const k = tabProcessed[rowIdx].trim();
+              const v = tabProcessed[rowIdx + 1].trim();
               if (k === "" || v === "") break;
               if (k.length > 30 || !/^[A-Za-z][A-Za-z]*(?: [A-Za-z]+)*$/.test(k)) break;
               result.push(`${k} | ${v}`);
@@ -372,7 +414,7 @@ function normalizeCellLines(inputLines: string[]): string[] {
       }
     }
 
-    result.push(inputLines[i]);
+    result.push(tabProcessed[i]);
     i++;
   }
 
@@ -470,7 +512,13 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     }
   }
 
-  // Group consecutive pipe lines
+  // Group consecutive pipe lines, splitting when column counts change.
+  // E.g., RTF produces:
+  //   "Client Number | Client Name | Invoice Number" (3 cols)
+  //   "016543 | Borough of Ridgway | 260804584270" (3 cols)
+  //   "Bill Account Number | Bill Account Name" (2 cols)
+  //   "0165431006 | Borough Of Ridgway" (2 cols)
+  // These are TWO separate sub-tables, not one 4-row table.
   const pipeBlocks: Array<{ start: number; end: number; rows: string[][] }> = [];
   let currentBlock: { start: number; end: number; rows: string[][] } | null = null;
   for (let i = 0; i < lines.length; i++) {
@@ -479,8 +527,18 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
       if (!currentBlock) {
         currentBlock = { start: i, end: i, rows: [cells] };
       } else {
-        currentBlock.end = i;
-        currentBlock.rows.push(cells);
+        // Split block if column count changes.
+        // Even a change of 1 column means different sub-tables
+        // (e.g., 3-col header+data followed by 2-col header+data).
+        const prevRowCols = currentBlock.rows[currentBlock.rows.length - 1].length;
+        const thisRowCols = cells.length;
+        if (thisRowCols !== prevRowCols && currentBlock.rows.length >= 2) {
+          pipeBlocks.push(currentBlock);
+          currentBlock = { start: i, end: i, rows: [cells] };
+        } else {
+          currentBlock.end = i;
+          currentBlock.rows.push(cells);
+        }
       }
     } else {
       if (currentBlock) { pipeBlocks.push(currentBlock); currentBlock = null; }
@@ -574,7 +632,7 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     const isHeader = block.rows.length >= 2 && firstRow && firstRow.length >= 2 &&
       firstRow.every(c => /^[A-Za-z][A-Za-z ]*$/.test(c)) &&
       (firstRow.length === 2
-        ? firstRow.every(c => c.length <= 10)
+        ? firstRow.every(c => c.length <= 8)
         : firstRow.every(c => c.length <= 20));
     const startRow = isHeader ? 1 : 0;
     const headers = isHeader ? firstRow.map(c => c.trim()) : [];
@@ -601,7 +659,21 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     for (let r = startRow; r < block.rows.length; r++) {
       const row = block.rows[r];
       if (row.length >= 2) {
-        if (isHeader && headers.length > 2) {
+        if (isFieldValuePairHeader) {
+          // Field/Value table (header is ["Field", "Value"]):
+          // col0 = field name, col1 = field value.
+          const field = row[0].trim();
+          const value = (row[1] ?? '').trim();
+          if (field !== '' && value !== '') {
+            items.push({
+              key: normalizeKey(field),
+              label: field,
+              value,
+              kind: 'field_value',
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
+        } else if (isHeader && headers.length > 2) {
           // Multi-column table (>2 cols): use header names as keys.
           for (let c = 0; c < headers.length && c < row.length; c++) {
             const baseField = headers[c];
