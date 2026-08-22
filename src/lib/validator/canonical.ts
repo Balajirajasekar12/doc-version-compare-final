@@ -497,10 +497,13 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   // PDF parser splits "Sort Description: Product/Sub Group-8 Digit" into
   // two lines: "Sort Description:" and "Product/Sub Group-8 Digit" because
   // they're at different X positions. Join them back together.
+  // Also build a set tracking which joinedLines indices came from pipe lines.
   const joinedLines: string[] = [];
+  const joinedPipeLines = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (trimmed === "" || pipeTableLines.has(i)) {
+      if (pipeTableLines.has(i)) joinedPipeLines.add(joinedLines.length);
       joinedLines.push(lines[i]);
       continue;
     }
@@ -528,7 +531,7 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
 
   // Process remaining lines (not in pipe tables)
   for (let i = 0; i < joinedLines.length; i++) {
-    if (pipeTableLines.has(i)) continue;
+    if (joinedPipeLines.has(i)) continue;
     const trimmed = joinedLines[i].trim();
     if (trimmed === "") continue;
     if (/^[|\-+:]+$/.test(trimmed)) continue; // table separator
@@ -539,7 +542,7 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
       // Check if this line appears immediately before a pipe table block.
       // If so, it's likely report metadata (e.g., "Account: 1000") that
       // identifies the report, not actual data. Treat as paragraph.
-      const nextNonEmpty = joinedLines.findIndex((l, j) => j > i && l.trim() !== "" && pipeTableLines.has(j));
+      const nextNonEmpty = joinedLines.findIndex((l, j) => j > i && l.trim() !== "" && joinedPipeLines.has(j));
       const isBeforeTable = nextNonEmpty === i + 1 || (nextNonEmpty > i && nextNonEmpty - i <= 2);
       
       // Also check: if the value matches a pure number/ID pattern and
@@ -1155,15 +1158,16 @@ export function compareCanonical(
     // Check 1: exact value match with any matched item
     if (matchedValues.has(itemVal)) return true;
 
-    // Check 2: value containment — paragraph contains a matched value
-    // ONLY suppress if the paragraph is SHORT and the matched value is a
-    // significant portion of it. This prevents suppressing genuine content
-    // differences like "Sort Description: Product/Sub Group-8 Digit".
+    // Check 2: value containment — paragraph contains or equals a matched value.
     for (const m of matched) {
       const mBaseVal = normalizeValue(m.baseline.value, mode).toLowerCase();
       const mCompVal = normalizeValue(m.comparing.value, mode).toLowerCase();
-      if (mBaseVal.length >= 3 && itemVal.includes(mBaseVal) && itemVal.length > mBaseVal.length && itemVal.length < 60) return true;
-      if (mCompVal.length >= 3 && itemVal.includes(mCompVal) && itemVal.length > mCompVal.length && itemVal.length < 60) return true;
+      // Exact match: paragraph text equals a matched item's value
+      if (mBaseVal.length >= 3 && itemVal === mBaseVal) return true;
+      if (mCompVal.length >= 3 && itemVal === mCompVal) return true;
+      // Containment: paragraph is longer than the matched value
+      if (mBaseVal.length >= 3 && itemVal.includes(mBaseVal) && itemVal.length > mBaseVal.length && itemVal.length < 80) return true;
+      if (mCompVal.length >= 3 && itemVal.includes(mCompVal) && itemVal.length > mCompVal.length && itemVal.length < 80) return true;
     }
 
     // Check 3: value matches a matched item's label (e.g., standalone "Account"
@@ -1190,10 +1194,9 @@ export function compareCanonical(
     if (/^[\d,.-]+$/.test(item.value.trim()) && item.value.trim().length <= 20) {
       return true;
     }
-    // Short title (≤5 words, ≤40 chars, title-case, no digits, no pipes/colons)
+    // Short title (≤5 words, ≤40 chars, title-case, no pipes/colons)
     if (item.value.length <= 40 && words.length <= 5 &&
         /^[A-Z][a-z]/.test(item.value) &&
-        !/\d/.test(item.value) &&
         !/[|:]/.test(item.value)) {
       return true;
     }
@@ -1229,9 +1232,13 @@ export function compareCanonical(
     if (item.kind === "field_value" || item.kind === "heading") return true;
     // Check if this paragraph's content exists anywhere in the comparing doc
     const normalized = normalizeValue(item.value, mode).toLowerCase();
-    if (allComparingValues.has(normalized)) return false; // exists, not a difference
+    if (allComparingValues.has(normalized)) return false; // exact match, not a difference
     // Short paragraphs are structural — suppress
     if (item.value.length < 30) return false;
+    // Check if any comparing value is contained in this paragraph (or vice versa)
+    for (const cv of allComparingValues) {
+      if (cv.length >= 3 && (normalized.includes(cv) || cv.includes(normalized))) return false;
+    }
     // Longer paragraphs might be genuine content — but only if they don't
     // contain content that's already matched
     return !isAlreadyRepresented(item);
@@ -1241,6 +1248,9 @@ export function compareCanonical(
     const normalized = normalizeValue(item.value, mode).toLowerCase();
     if (allBaselineValues.has(normalized)) return false;
     if (item.value.length < 30) return false;
+    for (const bv of allBaselineValues) {
+      if (bv.length >= 3 && (normalized.includes(bv) || bv.includes(normalized))) return false;
+    }
     return !isAlreadyRepresented(item);
   });
 
