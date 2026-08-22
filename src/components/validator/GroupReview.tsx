@@ -14,11 +14,12 @@ import { buildComparisonChain, getDefaultBaseline } from "@/lib/validator/chain"
 import { FORMAT_LABELS, type DocKind } from "@/lib/validator/types";
 import type { DocGroup } from "@/lib/validator/types";
 import { cn } from "@/lib/utils";
-import { useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
   ArrowRight,
+  ClipboardCopy,
   Files,
   FolderTree,
   GitCompareArrows,
@@ -143,6 +144,28 @@ function ComparisonChainDisplay({ group }: { group: DocGroup }) {
   );
 }
 
+function ErrorBadge({ error }: { error: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    navigator.clipboard.writeText(error).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }, [error]);
+  return (
+    <span className="inline-flex items-start gap-1 max-w-80 break-all rounded border border-destructive/40 bg-destructive/5 px-1.5 py-0.5 text-[11px] text-destructive">
+      <span className="shrink-0" title={error}>{error}</span>
+      <button
+        onClick={copy}
+        className="shrink-0 text-destructive/60 hover:text-destructive"
+        title="Copy error details"
+      >
+        {copied ? <span className="text-[9px]">✓</span> : <ClipboardCopy className="size-3" />}
+      </button>
+    </span>
+  );
+}
+
 function GroupRow({ group }: { group: DocGroup }) {
   const { refIndexByGroup, enabledGroups, setRefIndex, toggleGroup, baselineFormatByGroup, setBaselineFormat } = useValidator();
   const enabled = enabledGroups[group.id] !== false;
@@ -246,7 +269,7 @@ function GroupRow({ group }: { group: DocGroup }) {
               <span className="max-w-56 truncate">{doc.fileName}</span>
               {isRef && <span className="text-[10px] uppercase tracking-wide text-primary/70">ref</span>}
               {doc.error && (
-                <span className="max-w-40 truncate text-[11px] opacity-80">{doc.error}</span>
+                <ErrorBadge error={doc.error} />
               )}
             </span>
           );

@@ -452,6 +452,23 @@ export async function parseFile(file: File): Promise<ParsedDoc> {
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : "Failed to parse file";
+    // Build a diagnostic error message with file metadata
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const magic = detectFormatByMagicBytes(buf);
+    const firstBytes = Array.from(bytes.slice(0, 16))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ");
+    const firstChars = Array.from(bytes.slice(0, 64))
+      .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "."))
+      .join("");
+    const detail = [
+      errMsg,
+      `Size: ${file.size} bytes`,
+      `Magic bytes: ${firstBytes}`,
+      `Magic detected: ${magic ?? "none"}`,
+      `First chars: ${firstChars}`,
+    ].join(" | ");
     return {
       id,
       path,
@@ -461,7 +478,7 @@ export async function parseFile(file: File): Promise<ParsedDoc> {
       stem,
       versionTag: version,
       size: file.size,
-      error: "Unable to parse '" + fileName + "': " + errMsg,
+      error: detail,
     };
   }
 }
