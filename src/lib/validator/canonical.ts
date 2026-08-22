@@ -188,8 +188,18 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
           }
         }
         if (pairs.length > 0) return pairs;
-        // Fallback: use first two parts as field/value
-        pairs.push({ field: parts[0], value: parts[1] });
+        // Fallback: only use first two parts as field/value if the first part
+        // looks like a field label (alpha-only, starts with letter, ≤30 chars)
+        // and NOT like a pure number/ID.
+        if (parts.length >= 2) {
+          const candidateField = parts[0].trim();
+          const candidateValue = parts[1].trim();
+          const looksLikeLabel = /^[A-Za-z][A-Za-z ]{0,29}$/.test(candidateField) &&
+            !/^\d+$/.test(candidateField) && candidateField.length >= 2;
+          if (looksLikeLabel && candidateValue.length > 0) {
+            pairs.push({ field: candidateField, value: candidateValue });
+          }
+        }
         return pairs;
       }
     }
@@ -465,34 +475,24 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
           }
         } else {
           // Multi-column row in an irregular block.
-          // If first segment looks like an alpha label and second like a value
-          // (field/value pairs placed side-by-side in PDF), extract as pairs.
-          // Otherwise treat entire row as a paragraph (table data row).
+          // These rows mix field/value pairs with table data from PDF positioning.
+          // Use extractFieldValuesFromText which handles colon, equals, and pipe patterns.
+          // For remaining unmatched segments, treat as paragraph (table data).
           const lineText = cells.join(' | ');
-          const firstCell = cells[0].trim();
-          const secondCell = (cells[1] || '').trim();
-          // A field label: alpha words only, no digits, ≤30 chars
-          const isFirstLabel = /^[A-Za-z][A-Za-z ]{1,29}$/.test(firstCell) && !/\d/.test(firstCell);
-          // A value: has digits, currency, dates, or is non-alpha
-          const isSecondValue = secondCell.length > 0 && !/^[A-Za-z][A-Za-z ]*$/.test(secondCell);
+          const fvPairs = extractFieldValuesFromText(lineText);
           
-          if (cells.length <= 4 && isFirstLabel && isSecondValue) {
-            // Looks like field/value pairs placed side-by-side
-            for (let c = 0; c + 1 < cells.length; c += 2) {
-              const field = cells[c].trim();
-              const value = cells[c + 1].trim();
-              if (field !== '' && value !== '') {
-                items.push({
-                  key: normalizeKey(field),
-                  label: field,
-                  value,
-                  kind: 'field_value',
-                  sourceLocation: `Line ${block.start + 1 + r}`,
-                });
-              }
+          if (fvPairs.length > 0) {
+            for (const { field, value } of fvPairs) {
+              items.push({
+                key: normalizeKey(field),
+                label: field,
+                value,
+                kind: 'field_value',
+                sourceLocation: `Line ${block.start + 1 + r}`,
+              });
             }
           } else {
-            // Table data row or mixed content — treat as paragraph
+            // No field/value extraction possible — treat as paragraph
             items.push({
               key: normalizeKey(lineText),
               label: lineText,
@@ -1348,17 +1348,11 @@ export function compareCanonical(
       }
       return true; // Genuine field_value difference
     }
-    // Check if this paragraph's content exists anywhere in the comparing doc
-    if (allComparingValues.has(normalized)) return false; // exact match, not a difference
-    // Short paragraphs are structural — suppress
-    if (item.value.length < 30) return false;
-    // Check if any comparing value is contained in this paragraph (or vice versa)
-    for (const cv of allComparingValues) {
-      if (cv.length >= 3 && (normalized.includes(cv) || cv.includes(normalized))) return false;
-    }
-    // Longer paragraphs might be genuine content — but only if they don't
-    // contain content that's already matched
-    return !isAlreadyRepresented(item);
+    // ALL non-field_value/heading items are structural/formatting content.
+    // Only field_value and heading items represent actual data differences.
+    // Paragraphs, list_items, and table_cells differ between formats due to
+    // layout/rendering, not data changes. Suppress them all.
+    return false;
   });
   const addedInComparing = allUnmatchedComparing.filter(item => {
     const normalized = normalizeValue(item.value, mode).toLowerCase();
@@ -1373,13 +1367,8 @@ export function compareCanonical(
       }
       return true;
     }
-    // Non-field_value items: check if content exists in baseline
-    if (allBaselineValues.has(normalized)) return false;
-    if (item.value.length < 30) return false;
-    for (const bv of allBaselineValues) {
-      if (bv.length >= 3 && (normalized.includes(bv) || bv.includes(normalized))) return false;
-    }
-    return !isAlreadyRepresented(item);
+    // ALL non-field_value/heading items are structural — suppress
+    return false;
   });
 
   return { matched, missingInComparing, addedInComparing };
