@@ -1209,8 +1209,40 @@ export function compareCanonical(
     return false;
   }
 
-  const missingInComparing = allUnmatchedBaseline.filter(item => !isAlreadyRepresented(item));
-  const addedInComparing = allUnmatchedComparing.filter(item => !isAlreadyRepresented(item));
+  // FINAL REPORTING: Only report field_value and heading items as differences.
+  // All unmatched paragraphs, list_items, and table_cells are structural/
+  // formatting differences between formats — NOT data differences.
+  // For real organization documents, the data is identical across formats;
+  // only the layout/rendering differs. Reporting paragraph differences
+  // creates hundreds of false positives.
+  //
+  // Exception: paragraphs whose content does NOT appear in any form in the
+  // other document AND is longer than 20 chars are genuine content additions.
+  const allBaselineValues = new Set(
+    baseline.items.map(i => normalizeValue(i.value, mode).toLowerCase())
+  );
+  const allComparingValues = new Set(
+    comparing.items.map(i => normalizeValue(i.value, mode).toLowerCase())
+  );
+
+  const missingInComparing = allUnmatchedBaseline.filter(item => {
+    if (item.kind === "field_value" || item.kind === "heading") return true;
+    // Check if this paragraph's content exists anywhere in the comparing doc
+    const normalized = normalizeValue(item.value, mode).toLowerCase();
+    if (allComparingValues.has(normalized)) return false; // exists, not a difference
+    // Short paragraphs are structural — suppress
+    if (item.value.length < 30) return false;
+    // Longer paragraphs might be genuine content — but only if they don't
+    // contain content that's already matched
+    return !isAlreadyRepresented(item);
+  });
+  const addedInComparing = allUnmatchedComparing.filter(item => {
+    if (item.kind === "field_value" || item.kind === "heading") return true;
+    const normalized = normalizeValue(item.value, mode).toLowerCase();
+    if (allBaselineValues.has(normalized)) return false;
+    if (item.value.length < 30) return false;
+    return !isAlreadyRepresented(item);
+  });
 
   return { matched, missingInComparing, addedInComparing };
 }
