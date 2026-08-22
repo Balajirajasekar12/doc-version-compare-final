@@ -1069,14 +1069,13 @@ export function compareCanonical(
     // Check 1: exact value match with any matched item
     if (matchedValues.has(itemVal)) return true;
 
-    // Check 2: key match + value containment (e.g., "Account: 1001" contains "1001")
-    if (matchedKeys.has(itemKey)) {
-      for (const m of matched) {
-        const mBaseVal = normalizeValue(m.baseline.value, mode).toLowerCase();
-        const mCompVal = normalizeValue(m.comparing.value, mode).toLowerCase();
-        if (mBaseVal.length > 0 && itemVal.includes(mBaseVal) && mBaseVal.length >= 3) return true;
-        if (mCompVal.length > 0 && itemVal.includes(mCompVal) && mCompVal.length >= 3) return true;
-      }
+    // Check 2: value containment — paragraph contains a matched value
+    // (e.g., "Account: 1000 | Synthetic data" contains matched value "1000")
+    for (const m of matched) {
+      const mBaseVal = normalizeValue(m.baseline.value, mode).toLowerCase();
+      const mCompVal = normalizeValue(m.comparing.value, mode).toLowerCase();
+      if (mBaseVal.length >= 3 && itemVal.includes(mBaseVal) && itemVal.length > mBaseVal.length) return true;
+      if (mCompVal.length >= 3 && itemVal.includes(mCompVal) && itemVal.length > mCompVal.length) return true;
     }
 
     // Check 3: value matches a matched item's label (e.g., standalone "Account"
