@@ -164,6 +164,14 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
   // Pattern 1: Pipe-delimited segments
   if (trimmed.includes("|")) {
     const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
+    // When only 1 non-empty segment remains (trailing empty pipes from XLSX rows
+    // like "Sort Description: Product/Sub Group-8 Digit |  |  |  |  |  |"),
+    // strip the pipes and try single-segment extraction on the non-empty part.
+    if (parts.length === 1 && trimmed.includes("|")) {
+      const single = extractFromSegment(parts[0]);
+      if (single) { pairs.push(single); return pairs; }
+      // If extraction failed, fall through to single-segment extraction below
+    }
     if (parts.length >= 2) {
       // Check if this is a header row (all alpha-only, short)
       const isHeader = parts.length === 2 &&
@@ -174,11 +182,32 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
         // NOT table column delimiters. In this case, extract only the colon-separated
         // field_value from the first segment, not from all segments.
         if (parts[0].includes(":")) {
-          // Line like "Account: 1000 | Synthetic data | No real PHI" —
-          // pipes are visual separators in a sentence, NOT table delimiters.
-          // The first segment is a colon-separated metadata line that appears
-          // before the actual data table. Return empty so caller treats it as paragraph.
-          return pairs;
+          // Try to extract a colon-separated field_value from the first segment.
+          // Works for:
+          //   "Sort Description: | Product/Sub Group-8 Digit" → field=Sort Description, value=Product/Sub Group-8 Digit
+          //   "Sort Description: Product/Sub Group-8 Digit |  |  ..." → field=Sort Description, value=Product/Sub Group-8 Digit
+          //   "Account: 1000 | Synthetic data" → field=Account, value=1000 (metadata)
+          const firstSegExtracted = extractFromSegment(parts[0]);
+          if (firstSegExtracted && firstSegExtracted.value.length > 0) {
+            pairs.push(firstSegExtracted);
+          } else {
+            // Check if first segment ENDS with colon — it's a field label
+            // but extractFromSegment couldn't parse it (e.g., empty value after colon).
+            const firstSegTrimmed = parts[0].trim();
+            if (firstSegTrimmed.endsWith(":") && firstSegTrimmed.length > 1) {
+              const field = firstSegTrimmed.slice(0, -1).trim();
+              // Find the next non-empty segment as value
+              const nextNonEmpty = parts.slice(1).find(p => p.trim().length > 0);
+              if (field.length > 0 && nextNonEmpty) {
+                pairs.push({ field, value: nextNonEmpty.trim() });
+              }
+            } else {
+              // Colon is in the middle but extractFromSegment failed —
+              // likely metadata like "Account: 1000 | Synthetic data | No real PHI"
+              // Return empty so caller treats as paragraph.
+              return pairs;
+            }
+          }
         }
         // Split on pipes and extract field_value from each segment.
         for (const segment of parts) {
@@ -647,14 +676,18 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
       const nextNonEmpty = joinedLines.findIndex((l, j) => j > i && l.trim() !== "" && joinedPipeLines.has(j));
       const isBeforeTable = nextNonEmpty === i + 1 || (nextNonEmpty > i && nextNonEmpty - i <= 2);
       
-      // Also check: if the value matches a pure number/ID pattern and
-      // the field is a common metadata name, it's metadata.
+      // Also check: if the value is a pure identifier/code AND the field
+      // is a short single word, it's report metadata (not data).
+      // IMPORTANT: do NOT classify descriptive fields like "Sort Description"
+      // as metadata — those contain real data values.
       const isMetadata = fvPairs.length === 1 &&
         isBeforeTable &&
-        fvPairs[0].field.length <= 20 &&
+        fvPairs[0].field.length <= 15 &&
+        !fvPairs[0].field.includes(" ") &&
         /^[A-Za-z][A-Za-z ]*$/.test(fvPairs[0].field) &&
         !fvPairs[0].value.includes("|") &&
-        fvPairs[0].value.length < 30;
+        fvPairs[0].value.length < 20 &&
+        (/^\d+$/.test(fvPairs[0].value) || /^[A-Za-z0-9._-]+$/.test(fvPairs[0].value));
       
       for (const { field, value } of fvPairs) {
         items.push({
