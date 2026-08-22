@@ -885,10 +885,42 @@ export function compareCanonical(
         usedComp.add(cIdx);
         break;
       }
-      // Substring match: only if field key appears in paragraph text
-      const keyInParagraph = bNorm.includes(cEl.key) || bNorm.includes(normalizeKey(cEl.label));
+      // Substring match: if field key appears in paragraph text
+      // Handle colon-terminated labels: "sort description:" includes key "sort description"
+      const keyInParagraph = bNorm.includes(cEl.key) || bNorm.includes(normalizeKey(cEl.label)) ||
+        bNorm.replace(/:\s*$/, "").trim() === cEl.key ||
+        bNorm.replace(/:\s*$/, "").trim() === normalizeKey(cEl.label);
       if (keyInParagraph && bNorm.length < 80) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Phase 3b: Match colon-terminated paragraphs against field_values
+  // When PDF produces "Sort Description:" as a paragraph and DOCX/RTF produces
+  // field_value key=sort description, value=Product/Sub Group-8 Digit.
+  const unmatchedColonBaseline = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) =>
+      (el.kind === "paragraph" || el.kind === "list_item") &&
+      /[A-Za-z]:\s*$/.test(el.value.trim())
+    );
+  const unmatchedKVComparingPhase3b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+
+  for (const { el: bEl, idx: bIdx } of unmatchedColonBaseline) {
+    const paraKey = normalizeKey(bEl.value.replace(/:\s*$/, "").trim());
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComparingPhase3b) {
+      if (usedComp.has(cIdx)) continue;
+      if (cEl.key === paraKey) {
+        // The paragraph is just the field label with colon, the field_value has the value
+        // Match them — the paragraph "Sort Description:" matches field_value "sort description"
+        matched.push({ baseline: bEl, comparing: cEl, identical: false });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
         usedComp.add(cIdx);
@@ -919,7 +951,10 @@ export function compareCanonical(
         usedComp.add(bIdx);
         break;
       }
-      const keyInParagraph = cNorm.includes(bEl.key) || cNorm.includes(normalizeKey(bEl.label));
+      // Handle colon-terminated paragraph matching field key
+      const cNormStripped = cNorm.replace(/:\s*$/, "").trim();
+      const keyInParagraph = cNorm.includes(bEl.key) || cNorm.includes(normalizeKey(bEl.label)) ||
+        cNormStripped === bEl.key || cNormStripped === normalizeKey(bEl.label);
       if (keyInParagraph && cNorm.length < 80) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
