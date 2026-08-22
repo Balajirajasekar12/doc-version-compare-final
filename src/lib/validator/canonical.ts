@@ -1115,6 +1115,10 @@ export function compareCanonical(
       if (item.value.includes("|") && words.length >= 3) {
         return true;
       }
+      // Standalone numeric value (e.g., "1000" from "Account: 1000" metadata)
+      if (/^\d[\d,.-]*$/.test(item.value.trim()) && item.value.trim().length <= 20) {
+        return true;
+      }
     }
 
     return false;
