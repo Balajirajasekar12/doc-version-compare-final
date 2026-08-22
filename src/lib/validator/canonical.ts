@@ -297,6 +297,39 @@ function normalizeCellLines(inputLines: string[]): string[] {
 
     if (i + 1 < inputLines.length && isKey(trimmed)) {
       const nextTrimmed = inputLines[i + 1].trim();
+
+      // Pattern A: Alternating key-value (key on line N, value on line N+1).
+      // This handles RTF/DOCX where fields appear as separate lines:
+      //   "Invoice Number"
+      //   "260804584270"
+      //   "Bill Account Number"
+      //   "0165431006"
+      // We require at least 2 consecutive key-value pairs to avoid false matches.
+      if (!isKey(nextTrimmed) && isValue(nextTrimmed)) {
+        // Peek ahead: need at least one more key-value pair after this
+        const peekIdx = i + 2;
+        if (peekIdx + 1 < inputLines.length) {
+          const peekKey = inputLines[peekIdx].trim();
+          const peekVal = inputLines[peekIdx + 1].trim();
+          if (isKey(peekKey) && !isKey(peekVal) && isValue(peekVal)) {
+            // Found at least 2 consecutive key-value pairs — collect them all
+            const pairs: string[] = [`${trimmed} | ${nextTrimmed}`];
+            let rowIdx = i + 2;
+            while (rowIdx + 1 < inputLines.length) {
+              const k = inputLines[rowIdx].trim();
+              const v = inputLines[rowIdx + 1].trim();
+              if (k === "" || v === "") break;
+              if (!isKey(k) || !isValue(v)) break;
+              pairs.push(`${k} | ${v}`);
+              rowIdx += 2;
+            }
+            for (const pair of pairs) result.push(pair);
+            i = rowIdx;
+            continue;
+          }
+        }
+      }
+
       if (isKey(nextTrimmed)) {
         // Two consecutive alpha-only lines — possible table start.
         // SAFETY CHECK: Verify this looks like a real table.
@@ -828,21 +861,89 @@ function sheetToCanonical(doc: ParsedDoc): ContentItem[] {
         }
       }
     } else {
-      for (let r = 0; r < rows.length; r++) {
-        const row = rows[r];
-        if (!row) continue;
-        for (let c = 0; c < row.length; c++) {
-          const value = row[c].trim();
-          if (value === "") continue;
-          const addr = `${colLetters(c)}${r + 1}`;
+      // Non-header layout.
+      // Check if this is a single-column sheet with alternating key-value pairs.
+      const maxCols = Math.max(...rows.filter(r => r).map(r => r.length));
+      const isSingleCol = maxCols <= 1;
+
+      if (isSingleCol) {
+        // Single-column: check for alternating key-value pattern
+        const isKeyRow = (s: string): boolean =>
+          s.length > 0 && s.length < 30 &&
+          /^[A-Za-z][A-Za-z]*(?: [A-Za-z]+)*$/.test(s) &&
+          !s.includes(":") && !s.includes("|");
+        const isValRow = (s: string): boolean =>
+          s.length > 0 && s.length < 50 &&
+          !s.includes(":") && !s.includes("|");
+
+        let r = 0;
+        while (r < rows.length) {
+          const row = rows[r];
+          if (!row) { r++; continue; }
+          const cell0 = (row[0] ?? "").trim();
+          if (cell0 === "") { r++; continue; }
+
+          // Check if this row is a key and next row is a value
+          if (r + 1 < rows.length && isKeyRow(cell0)) {
+            const nextRow = rows[r + 1];
+            const nextCell0 = (nextRow?.[0] ?? "").trim();
+            if (isValRow(nextCell0)) {
+              items.push({
+                key: normalizeKey(cell0),
+                label: cell0,
+                value: nextCell0,
+                kind: "field_value",
+                sourceLocation: `${sheet.name} · A${r + 1}`,
+                sheet: sheet.name,
+              });
+              r += 2;
+              continue;
+            }
+          }
+
+          // Check for colon-separated
+          const colonMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(cell0);
+          if (colonMatch) {
+            items.push({
+              key: normalizeKey(colonMatch[1].trim()),
+              label: colonMatch[1].trim(),
+              value: colonMatch[2].trim(),
+              kind: "field_value",
+              sourceLocation: `${sheet.name} · A${r + 1}`,
+              sheet: sheet.name,
+            });
+            r++;
+            continue;
+          }
+
           items.push({
-            key: `cell_${r}_${c}`,
-            label: addr,
-            value,
+            key: `cell_${r}_0`,
+            label: `A${r + 1}`,
+            value: cell0,
             kind: "table_cell",
-            sourceLocation: `${sheet.name} · ${addr}`,
+            sourceLocation: `${sheet.name} · A${r + 1}`,
             sheet: sheet.name,
           });
+          r++;
+        }
+      } else {
+        // Multi-column: use table_cell items
+        for (let r = 0; r < rows.length; r++) {
+          const row = rows[r];
+          if (!row) continue;
+          for (let c = 0; c < row.length; c++) {
+            const value = row[c].trim();
+            if (value === "") continue;
+            const addr = `${colLetters(c)}${r + 1}`;
+            items.push({
+              key: `cell_${r}_${c}`,
+              label: addr,
+              value,
+              kind: "table_cell",
+              sourceLocation: `${sheet.name} · ${addr}`,
+              sheet: sheet.name,
+            });
+          }
         }
       }
     }
@@ -952,6 +1053,14 @@ export function compareCanonical(
   for (const { el: bEl, idx: bIdx } of remainingBaseline) {
     for (const { el: cEl, idx: cIdx } of remainingComparing) {
       if (usedComp.has(cIdx)) continue;
+      // Don't match field_value vs field_value by value alone —
+      // two different fields can have the same value (e.g.,
+      // "Client Name" = Borough of Ridgway, "Bill Account Name" = Borough Of Ridgway).
+      // Phase 1 already matched field_values by key. Phase 2 should only match
+      // non-KV items (paragraphs, table_cells) or cross-kind matches.
+      const bothKv = (bEl.kind === "field_value" || bEl.kind === "heading") &&
+                     (cEl.kind === "field_value" || cEl.kind === "heading");
+      if (bothKv) continue;
       if (valuesEqual(bEl.value, cEl.value)) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
@@ -1364,43 +1473,27 @@ export function compareCanonical(
   );
 
   const missingInComparing = allUnmatchedBaseline.filter(item => {
-    const normalized = normalizeValue(item.value, mode).toLowerCase();
-    const itemKey = item.key;
-
     if (item.kind === "field_value" || item.kind === "heading") {
-      // Check if this field_value's VALUE or KEY exists in the comparing doc.
-      // This prevents false positives when the same data is represented as
-      // different item types across formats (e.g., PDF field_value vs DOCX paragraph).
-      if (normalized.length >= 3 && allComparingValues.has(normalized)) return false;
-      // Check if the key (normalized label) matches a comparing item's key
-      const allComparingKeys = new Set(comparing.items.map(i => i.key));
-      if (allComparingKeys.has(itemKey)) return false;
-      // Check substring containment in either direction
-      for (const cv of allComparingValues) {
-        if (cv.length >= 3 && (normalized.includes(cv) || cv.includes(normalized))) return false;
-      }
-      return true; // Genuine field_value difference
+      // Phase 1 already matched field_value/heading items by normalized key.
+      // If this item is still unmatched, its key does NOT exist in the comparing doc.
+      // All 8 matching phases have been tried. Report as a genuine difference.
+      // Do NOT suppress based on value matching — two different fields can have
+      // the same value (e.g., Client Name = Borough of Ridgway, Bill Account Name = Borough Of Ridgway).
+      // Do NOT suppress based on substring matching — one value can be a substring of another
+      // (e.g., Client Number = 016543, Bill Account Number = 0165431006).
+      return true;
     }
-    // ALL non-field_value/heading items are structural/formatting content.
-    // Only field_value and heading items represent actual data differences.
-    // Paragraphs, list_items, and table_cells differ between formats due to
-    // layout/rendering, not data changes. Suppress them all.
+    // Non-field_value items (paragraphs, list_items, table_cells) are structural/formatting.
+    // Suppress them — they differ between formats due to layout, not data.
     return false;
   });
   const addedInComparing = allUnmatchedComparing.filter(item => {
-    const normalized = normalizeValue(item.value, mode).toLowerCase();
-    const itemKey = item.key;
-
     if (item.kind === "field_value" || item.kind === "heading") {
-      if (normalized.length >= 3 && allBaselineValues.has(normalized)) return false;
-      const allBaselineKeys = new Set(baseline.items.map(i => i.key));
-      if (allBaselineKeys.has(itemKey)) return false;
-      for (const bv of allBaselineValues) {
-        if (bv.length >= 3 && (normalized.includes(bv) || bv.includes(normalized))) return false;
-      }
+      // Same logic as missingInComparing: if unmatched after all 8 phases,
+      // it's genuinely new content in the comparing document.
       return true;
     }
-    // ALL non-field_value/heading items are structural — suppress
+    // Non-field_value items are structural — suppress
     return false;
   });
 
