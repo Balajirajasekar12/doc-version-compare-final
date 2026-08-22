@@ -424,6 +424,88 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   // Process pipe table blocks
   for (const block of pipeBlocks) {
     const firstRow = block.rows[0];
+
+    // Detect IRREGULAR pipe blocks: rows with wildly different column counts
+    // (e.g., 6, 4, 2, 3). These are NOT real tables — they're field/value pairs
+    // that happen to have pipes due to PDF positioning. Process each line individually.
+    const colCounts = block.rows.map(r => r.length);
+    const minCols = Math.min(...colCounts);
+    const maxCols = Math.max(...colCounts);
+    const isIrregular = maxCols - minCols > 2 || (maxCols > 2 && minCols < 2);
+
+    if (isIrregular) {
+      // Irregular block: these are field/value pairs mixed on the same line
+      // due to PDF positioning. Extract adjacent pairs directly from pipe segments.
+      for (let r = 0; r < block.rows.length; r++) {
+        const cells = block.rows[r];
+        if (cells.length === 1) {
+          // Single cell — might be a paragraph
+          const text = cells[0].trim();
+          if (text !== '') {
+            items.push({
+              key: normalizeKey(text),
+              label: text,
+              value: text,
+              kind: 'paragraph',
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
+        } else if (cells.length === 2) {
+          // Standard 2-column: col0=field, col1=value
+          const field = cells[0].trim();
+          const value = cells[1].trim();
+          if (field !== '' && value !== '') {
+            items.push({
+              key: normalizeKey(field),
+              label: field,
+              value,
+              kind: 'field_value',
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
+        } else {
+          // Multi-column row in an irregular block.
+          // If first segment looks like an alpha label and second like a value
+          // (field/value pairs placed side-by-side in PDF), extract as pairs.
+          // Otherwise treat entire row as a paragraph (table data row).
+          const lineText = cells.join(' | ');
+          const firstCell = cells[0].trim();
+          const secondCell = (cells[1] || '').trim();
+          // A field label: alpha words only, no digits, ≤30 chars
+          const isFirstLabel = /^[A-Za-z][A-Za-z ]{1,29}$/.test(firstCell) && !/\d/.test(firstCell);
+          // A value: has digits, currency, dates, or is non-alpha
+          const isSecondValue = secondCell.length > 0 && !/^[A-Za-z][A-Za-z ]*$/.test(secondCell);
+          
+          if (cells.length <= 4 && isFirstLabel && isSecondValue) {
+            // Looks like field/value pairs placed side-by-side
+            for (let c = 0; c + 1 < cells.length; c += 2) {
+              const field = cells[c].trim();
+              const value = cells[c + 1].trim();
+              if (field !== '' && value !== '') {
+                items.push({
+                  key: normalizeKey(field),
+                  label: field,
+                  value,
+                  kind: 'field_value',
+                  sourceLocation: `Line ${block.start + 1 + r}`,
+                });
+              }
+            }
+          } else {
+            // Table data row or mixed content — treat as paragraph
+            items.push({
+              key: normalizeKey(lineText),
+              label: lineText,
+              value: lineText,
+              kind: 'paragraph',
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
+        }
+      }
+      continue; // Skip normal table processing for this block
+    }
+
     // Only treat as header if there are at least 2 rows.
     // 2-column headers: both parts ≤10 chars (e.g., "Field", "Value").
     // Multi-column headers (>2 cols): all parts ≤20 chars (e.g., "Transaction ID", "Product").
@@ -476,17 +558,37 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
             }
           }
         } else {
-          // 2-column table or no header: first col = field, second = value
-          const field = row[0].trim();
-          const value = row[1].trim();
-          if (field !== "" && value !== "") {
-            items.push({
-              key: normalizeKey(field),
-              label: field,
-              value,
-              kind: "field_value",
-              sourceLocation: `Line ${block.start + 1 + r}`,
-            });
+          // Non-header table: extract field/value pairs.
+          // For multi-column rows (e.g., PDF puts "Client Number | 016543 | Client Name | Borough of Ridgway")
+          // extract ALL pairs: even cols = keys, odd cols = values.
+          // For 2-column rows: col 0 = field, col 1 = value.
+          if (row.length <= 2) {
+            const field = row[0].trim();
+            const value = (row[1] ?? '').trim();
+            if (field !== '' && value !== '') {
+              items.push({
+                key: normalizeKey(field),
+                label: field,
+                value,
+                kind: 'field_value',
+                sourceLocation: `Line ${block.start + 1 + r}`,
+              });
+            }
+          } else {
+            // Multi-column: extract adjacent pairs (col0=field, col1=value, col2=field, col3=value, ...)
+            for (let c = 0; c + 1 < row.length; c += 2) {
+              const field = row[c].trim();
+              const value = row[c + 1].trim();
+              if (field !== '' && value !== '') {
+                items.push({
+                  key: normalizeKey(field),
+                  label: field,
+                  value,
+                  kind: 'field_value',
+                  sourceLocation: `Line ${block.start + 1 + r}`,
+                });
+              }
+            }
           }
         }
       }
