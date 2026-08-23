@@ -4,7 +4,7 @@ import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import { ConvexReactClient } from "convex/react";
 import React, { StrictMode, useEffect, useState, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Route, Routes, useLocation } from "react-router";
+import { BrowserRouter, HashRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
 
 // Lazy load route components
@@ -104,9 +104,11 @@ function AppSwitcher() {
   if (loadMip) {
     // MIP uses its own HashRouter with basename="/mip"
     return (
-      <Suspense fallback={<RouteLoading />}>
-        <MipApp />
-      </Suspense>
+      <HashRouter basename="/mip">
+        <Suspense fallback={<RouteLoading />}>
+          <MipApp />
+        </Suspense>
+      </HashRouter>
     );
   }
 
