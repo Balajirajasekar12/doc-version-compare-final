@@ -370,13 +370,11 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   const lines = normalizeCellLines(filterArtifactLines(rawLines));
   const items: ContentItem[] = [];
 
-  // First pass: detect pipe-delimited and tab-delimited table blocks
+  // First pass: detect pipe-delimited table blocks
   const pipeLineIndices = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    // Check for pipe-delimited
-    if (trimmed.includes("|")) {
-      const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
+    if (lines[i].trim().includes("|")) {
+      const parts = lines[i].trim().split("|").map(p => p.trim()).filter(p => p !== "");
       // Only treat as pipe-delimited if first part has no colon.
       // A line like "Account: 1000 | Synthetic data" has pipes as visual
       // separators in a sentence, not as table column delimiters.
@@ -384,35 +382,19 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
         pipeLineIndices.add(i);
       }
     }
-    // Check for tab-delimited (from RTF \cell, PDF column extraction, etc.)
-    // Tabs always represent column separators in document content.
-    else if (trimmed.includes("\t")) {
-      const parts = trimmed.split("\t").map(p => p.trim()).filter(p => p !== "");
-      if (parts.length >= 2 && !parts[0].includes(":")) {
-        pipeLineIndices.add(i);
-      }
-    }
   }
 
-  // Group consecutive pipe/tab table lines
+  // Group consecutive pipe lines
   const pipeBlocks: Array<{ start: number; end: number; rows: string[][] }> = [];
   let currentBlock: { start: number; end: number; rows: string[][] } | null = null;
   for (let i = 0; i < lines.length; i++) {
     if (pipeLineIndices.has(i)) {
-      const trimmed = lines[i].trim();
-      // Split by the appropriate delimiter (pipe or tab)
-      const cells = trimmed.includes("|")
-        ? trimmed.split("|").map(c => c.trim())
-        : trimmed.split("\t").map(c => c.trim());
-      // For tab-separated lines, also create a filtered version without empty cells
-      // This handles cases like "Advance Deposit Total\t\t\t\t($111.11)" where
-      // empty cells between tabs should be ignored for field/value extraction.
-      const filteredCells = cells.filter(c => c !== "");
+      const cells = lines[i].trim().split("|").map(c => c.trim());
       if (!currentBlock) {
-        currentBlock = { start: i, end: i, rows: [filteredCells.length >= 2 ? filteredCells : cells] };
+        currentBlock = { start: i, end: i, rows: [cells] };
       } else {
         currentBlock.end = i;
-        currentBlock.rows.push(filteredCells.length >= 2 ? filteredCells : cells);
+        currentBlock.rows.push(cells);
       }
     } else {
       if (currentBlock) { pipeBlocks.push(currentBlock); currentBlock = null; }
