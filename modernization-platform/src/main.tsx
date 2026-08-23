@@ -7,7 +7,7 @@
 
 import React, { StrictMode, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Routes, Route } from "react-router";
+import { HashRouter, Routes, Route } from "react-router";
 import "./index.css";
 
 const ModernizationApp = lazy(() => import("./modernization/ModernizationApp"));
@@ -62,13 +62,13 @@ document.documentElement.classList.add("dark");
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
-      <BrowserRouter>
+      <HashRouter basename="/mip">
         <Suspense fallback={<RouteLoading />}>
           <Routes>
             <Route path="/*" element={<ModernizationApp />} />
           </Routes>
         </Suspense>
-      </BrowserRouter>
+      </HashRouter>
     </RootErrorBoundary>
   </StrictMode>,
 );

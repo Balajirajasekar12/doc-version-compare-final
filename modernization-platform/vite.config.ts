@@ -6,7 +6,7 @@ import { defineConfig } from "vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: '/mip/',
+  base: '/',
   plugins: [react(), vlyPlugin(), tailwindcss()],
   resolve: {
     alias: {
@@ -18,8 +18,8 @@ export default defineConfig({
     dedupe: ["react", "react/jsx-runtime", "react-dom", "react-dom/client"],
   },
   build: {
-    // Output to parent dist/mip/ for monorepo deployment
-    outDir: '../dist/mip',
+    // Output to dist_mip/ — merged into dist/ by build:monorepo
+    outDir: '../dist_mip',
     emptyOutDir: true,
     // Enable source maps for better debugging (disable in production if needed)
     sourcemap: false,
@@ -63,9 +63,9 @@ export default defineConfig({
           'forms': ['react-hook-form', '@hookform/resolvers', 'zod'],
         },
         // Optimize chunk size
-        chunkFileNames: 'assets/[name]-[hash].js',
-        entryFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]',
+        chunkFileNames: 'assets/mip-[name]-[hash].js',
+        entryFileNames: 'assets/mip-[name]-[hash].js',
+        assetFileNames: 'assets/mip-[name]-[hash].[ext]',
       },
     },
     // Increase chunk size warning limit for better chunking

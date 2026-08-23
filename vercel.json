@@ -4,7 +4,7 @@
   "outputDirectory": "dist",
   "installCommand": "npm install && cd modernization-platform && npm install",
   "rewrites": [
-    { "source": "/mip/(.*)", "destination": "/mip/index.html" },
+    { "source": "/mip.html", "destination": "/mip.html" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

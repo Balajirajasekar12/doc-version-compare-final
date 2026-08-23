@@ -2,7 +2,7 @@ import "@vly-ai/integrations";
 import { Toaster } from "@/components/ui/sonner";
 import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
 import { ConvexReactClient } from "convex/react";
-import React, { StrictMode, useEffect, lazy, Suspense } from "react";
+import React, { StrictMode, useEffect, useState, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
@@ -12,6 +12,9 @@ const Landing = lazy(() => import("./pages/Landing.tsx"));
 const Auth = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
+
+// MIP is lazy-loaded only when the URL hash starts with #/mip
+const MipApp = lazy(() => import("../modernization-platform/src/modernization/ModernizationApp"));
 
 // Simple loading fallback
 function RouteLoading() {
@@ -81,6 +84,48 @@ class RootErrorBoundary extends React.Component<
 const convexUrl = import.meta.env.VITE_CONVEX_URL as string | undefined;
 const convex = convexUrl ? new ConvexReactClient(convexUrl) : null;
 
+/**
+ * Hash-based app switcher.
+ * If the URL hash starts with #/mip, load MIP. Otherwise load DVC.
+ * Both apps remain completely isolated — MIP's code is never loaded
+ * unless someone actually navigates to #/mip.
+ */
+function AppSwitcher() {
+  const [loadMip, setLoadMip] = useState(() => window.location.hash.startsWith("#/mip"));
+
+  useEffect(() => {
+    function onHashChange() {
+      setLoadMip(window.location.hash.startsWith("#/mip"));
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  if (loadMip) {
+    // MIP uses its own HashRouter with basename="/mip"
+    return (
+      <Suspense fallback={<RouteLoading />}>
+        <MipApp />
+      </Suspense>
+    );
+  }
+
+  // DVC — existing BrowserRouter
+  return (
+    <BrowserRouter>
+      <RouteSyncer />
+      <Suspense fallback={<RouteLoading />}>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/auth" element={<Auth />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
+    </BrowserRouter>
+  );
+}
+
 function RouteSyncer() {
   const location = useLocation();
   useEffect(() => {
@@ -110,17 +155,7 @@ createRoot(document.getElementById("root")!).render(
       <ToolbarErrorBoundary>
         <VlyToolbar />
       </ToolbarErrorBoundary>
-      <BrowserRouter>
-        <RouteSyncer />
-        <Suspense fallback={<RouteLoading />}>
-          <Routes>
-            <Route path="/" element={<Landing />} />
-            <Route path="/auth" element={<Auth />} />
-            <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="*" element={<NotFound />} />
-          </Routes>
-        </Suspense>
-      </BrowserRouter>
+      <AppSwitcher />
       <Toaster />
     </RootErrorBoundary>
   </StrictMode>
