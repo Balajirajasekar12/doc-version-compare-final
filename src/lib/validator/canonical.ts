@@ -301,49 +301,45 @@ function normalizeCellLines(inputLines: string[]): string[] {
         // Check if next line has same column count with tabs AND has non-labels (values).
         // Only pair multi-column lines (3+ labels) — 2-column lines like
         // "Status\tActive" are independent field/value pairs, not paired columns.
-        if (allLabels && segs.length >= 2 && li + 1 < inputLines.length) {
-          const nextTrimmed = inputLines[li + 1].trim();
-          if (nextTrimmed.includes("\t")) {
-            const nextSegs = nextTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
-            if (nextSegs.length === segs.length && hasNonLabel(nextSegs)) {
-              // Found a header row followed by data row(s).
-              const numCols = segs.length;
-              const dataRows: string[][] = [nextSegs];
-              let dataIdx = li + 1;
-              while (dataIdx < inputLines.length) {
-                const dataTrimmed = inputLines[dataIdx].trim();
-                if (!dataTrimmed.includes("\t")) break;
-                const dataSegs = dataTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
-                if (dataSegs.length !== numCols) break;
-                dataRows.push(dataSegs);
-                dataIdx++;
-              }
-              if (numCols >= 3) {
-                // 3+ columns: PAIR column-by-column.
-                // e.g., "Client Number | Client Name | Invoice Number"
-                //   + "016543 | B of Ridgway | 260804584270"
-                // → "Client Number | 016543", "Client Name | B of Ridgway", etc.
+        if (allLabels && segs.length >= 2) {
+          // Skip empty lines to find the next data row
+          let nextIdx = li + 1;
+          while (nextIdx < inputLines.length && inputLines[nextIdx].trim() === "") nextIdx++;
+          if (nextIdx < inputLines.length) {
+            const nextTrimmed = inputLines[nextIdx].trim();
+            if (nextTrimmed.includes("\t")) {
+              const nextSegs = nextTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
+              if (nextSegs.length === segs.length && hasNonLabel(nextSegs)) {
+                // Found a header row followed by data row(s).
+                const numCols = segs.length;
+                const dataRows: string[][] = [nextSegs];
+                let dataIdx = nextIdx + 1;
+                while (dataIdx < inputLines.length) {
+                  const dataTrimmed = inputLines[dataIdx].trim();
+                  if (dataTrimmed === "") { dataIdx++; continue; }
+                  if (!dataTrimmed.includes("\t")) break;
+                  const dataSegs = dataTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
+                  if (dataSegs.length !== numCols) break;
+                  dataRows.push(dataSegs);
+                  dataIdx++;
+                }
+                // PAIR column-by-column for ALL header+data tab blocks.
+                // This correctly handles:
+                //   2-col: "Bill Account Number | Bill Account Name" + "0165431006 | Borough Of Ridgway"
+                //   3+col: "Client Number | Client Name | Invoice Number" + "016543 | ... | 260804584270"
                 for (const dataRow of dataRows) {
                   for (let col = 0; col < numCols; col++) {
                     const header = segs[col];
                     const value = dataRow[col];
                     if (header && value) {
-                      tabProcessed.push(`${header} | ${value}`);
+                      tabProcessed.push(header + " | " + value);
                     }
                   }
                 }
-              } else {
-                // 2 columns: row-by-row pipe-delimited.
-                // e.g., "Field | Value", "Account | 1000", "Customer | Alpha"
-                // Each row is an independent field/value pair.
-                tabProcessed.push(segs.join(" | "));
-                for (const dataRow of dataRows) {
-                  tabProcessed.push(dataRow.join(" | "));
-                }
+                // Skip all consumed lines
+                li = dataIdx - 1; // -1 because for loop will increment
+                continue;
               }
-              // Skip all consumed lines
-              li = dataIdx - 1; // -1 because for loop will increment
-              continue;
             }
           }
         }
@@ -618,12 +614,16 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   // First pass: detect pipe-delimited table blocks
   const pipeLineIndices = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim().includes("|")) {
-      const parts = lines[i].trim().split("|").map(p => p.trim()).filter(p => p !== "");
-      // Only treat as pipe-delimited if first part has no colon.
-      // A line like "Account: 1000 | Synthetic data" has pipes as visual
-      // separators in a sentence, not as table column delimiters.
+    const lineTrimmed = lines[i].trim();
+    if (lineTrimmed.includes("|")) {
+      const parts = lineTrimmed.split("|").map(p => p.trim()).filter(p => p !== "");
       if (parts.length >= 2 && !parts[0].includes(":")) {
+        pipeLineIndices.add(i);
+      }
+    } else if (lineTrimmed.includes("\t")) {
+      // Lines with 3+ tabs are multi-column table rows from RTF.
+      const tabParts = lineTrimmed.split("\t").map(p => p.trim()).filter(p => p !== "");
+      if (tabParts.length >= 3) {
         pipeLineIndices.add(i);
       }
     }
@@ -640,7 +640,10 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   let currentBlock: { start: number; end: number; rows: string[][] } | null = null;
   for (let i = 0; i < lines.length; i++) {
     if (pipeLineIndices.has(i)) {
-      const cells = lines[i].trim().split("|").map(c => c.trim());
+      const lineTrimmed = lines[i].trim();
+      const cells = lineTrimmed.includes("|")
+        ? lineTrimmed.split("|").map(c => c.trim())
+        : lineTrimmed.split("\t").map(c => c.trim()).filter(c => c !== "");
       if (!currentBlock) {
         currentBlock = { start: i, end: i, rows: [cells] };
       } else {
