@@ -10,7 +10,7 @@
     "build": "tsc -b && vite build",
     "build:document": "tsc -b && vite build",
     "build:modernization": "cd modernization-platform && npm run build",
-    "build:monorepo": "cd modernization-platform && npm run build && cd .. && tsc -b && vite build --emptyOutDir false && node scripts/merge-mip-build.mjs",
+    "build:monorepo": "tsc -b && vite build",
     "lint": "eslint .",
     "format": "prettier --write .",
     "preview": "vite preview"

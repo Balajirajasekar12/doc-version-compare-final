@@ -10,6 +10,10 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      // Force MIP files (imported from ../modernization-platform/) to use
+      // DVC's react-router copy, preventing dual-package hazard.
+      "react-router": path.resolve(__dirname, "node_modules/react-router"),
+      "react-router-dom": path.resolve(__dirname, "node_modules/react-router"),
     },
     // Force a single copy of React across all packages (including vlyPlugin).
     // Without this, @vly-ai/integrations can resolve its own React copy, which
