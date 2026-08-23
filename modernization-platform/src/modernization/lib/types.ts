@@ -461,8 +461,57 @@ export interface ModernizationProject {
   domain?: string;
   status: ProjectStatus;
   modFrozen: boolean;
+  frozenVersion?: string;
+  frozenReason?: string;
+  frozenAt?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+// ── Freeze History ───────────────────────────────────────────
+
+export interface FreezeHistoryEntry {
+  id: string;
+  projectId: string;
+  version: string;
+  reason: string;
+  resolvedDiffs: number;
+  totalDiffs: number;
+  unresolvedCriticalDiffs: number;
+  frozenBy: string;
+  frozenAt: number;
+}
+
+// ── Test Data ────────────────────────────────────────────────
+
+export type TestDataSource = "HISTORICAL" | "SCHEMA" | "CODE" | "USER_CONFIRMED" | "GENERATED";
+
+export interface TestDataEntry {
+  id: string;
+  projectId: string;
+  testcaseId?: string;
+  fieldName: string;
+  value: string;
+  source: TestDataSource;
+  sourceDetail?: string;
+  createdAt: number;
+}
+
+// ── Automation Results ────────────────────────────────────────
+
+export type AutomationResultStatus = "PASSED" | "FAILED" | "SKIPPED" | "ERROR";
+
+export interface AutomationResult {
+  id: string;
+  projectId: string;
+  testCycleId: string;
+  testcaseId: string;
+  className: string;
+  methodName?: string;
+  result: AutomationResultStatus;
+  duration?: number;
+  errorMessage?: string;
+  importedAt: number;
 }
 
 // ── Application State ─────────────────────────────────────────
@@ -496,6 +545,15 @@ export interface ModernizationState {
   stepExecutions: Record<string, StepExecution>;
   testEvidence: Record<string, TestEvidence>;
   defects: Record<string, Defect>;
+  
+  // Freeze History
+  freezeHistory: Record<string, FreezeHistoryEntry>;
+  
+  // Test Data
+  testDataEntries: Record<string, TestDataEntry>;
+  
+  // Automation Results
+  automationResults: Record<string, AutomationResult>;
 }
 
 // ── Action Types ──────────────────────────────────────────────
@@ -568,6 +626,17 @@ export type ModernizationAction =
   // Defects
   | { type: "ADD_DEFECT"; defect: Defect }
   | { type: "UPDATE_DEFECT"; id: string; updates: Partial<Defect> }
+  
+  // Freeze History
+  | { type: "ADD_FREEZE_ENTRY"; entry: FreezeHistoryEntry }
+  | { type: "FREEZE_PROJECT"; projectId: string; version: string; reason: string; resolvedDiffs: number; totalDiffs: number; unresolvedCriticalDiffs: number; frozenBy: string }
+  
+  // Test Data
+  | { type: "ADD_TEST_DATA_ENTRY"; entry: TestDataEntry }
+  | { type: "REMOVE_TEST_DATA_ENTRY"; id: string }
+  
+  // Automation Results
+  | { type: "ADD_AUTOMATION_RESULTS"; results: AutomationResult[] }
   
   // Bulk import (for project import)
   | { type: "IMPORT_PROJECT_DATA"; data: Partial<ModernizationState> }

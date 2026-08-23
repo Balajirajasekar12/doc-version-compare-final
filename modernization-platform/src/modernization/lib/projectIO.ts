@@ -32,6 +32,9 @@ interface MipFile {
     stepExecutions: ModernizationState["stepExecutions"];
     testEvidence: ModernizationState["testEvidence"];
     defects: ModernizationState["defects"];
+    freezeHistory: ModernizationState["freezeHistory"];
+    testDataEntries: ModernizationState["testDataEntries"];
+    automationResults: ModernizationState["automationResults"];
   };
 }
 
@@ -64,6 +67,9 @@ export function exportProject(
       stepExecutions: state.stepExecutions,
       testEvidence: state.testEvidence,
       defects: state.defects,
+      freezeHistory: state.freezeHistory,
+      testDataEntries: state.testDataEntries,
+      automationResults: state.automationResults,
     },
   };
 

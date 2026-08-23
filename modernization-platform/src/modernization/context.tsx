@@ -49,6 +49,9 @@ const initialState: ModernizationState = {
   stepExecutions: {},
   testEvidence: {},
   defects: {},
+  freezeHistory: {},
+  testDataEntries: {},
+  automationResults: {},
 };
 
 // ── Reducer ───────────────────────────────────────────────────
@@ -427,7 +430,60 @@ function reducer(state: ModernizationState, action: ModernizationAction): Modern
       if (imported.stepExecutions) newState.stepExecutions = { ...state.stepExecutions, ...imported.stepExecutions };
       if (imported.testEvidence) newState.testEvidence = { ...state.testEvidence, ...imported.testEvidence };
       if (imported.defects) newState.defects = { ...state.defects, ...imported.defects };
+      if (imported.freezeHistory) newState.freezeHistory = { ...state.freezeHistory, ...imported.freezeHistory };
+      if (imported.testDataEntries) newState.testDataEntries = { ...state.testDataEntries, ...imported.testDataEntries };
+      if (imported.automationResults) newState.automationResults = { ...state.automationResults, ...imported.automationResults };
       return newState;
+    }
+
+    // Freeze
+    case "ADD_FREEZE_ENTRY":
+      return {
+        ...state,
+        freezeHistory: { ...state.freezeHistory, [action.entry.id]: action.entry },
+      };
+    case "FREEZE_PROJECT": {
+      const freezeEntry = {
+        id: genId(),
+        projectId: action.projectId,
+        version: action.version,
+        reason: action.reason,
+        resolvedDiffs: action.resolvedDiffs,
+        totalDiffs: action.totalDiffs,
+        unresolvedCriticalDiffs: action.unresolvedCriticalDiffs,
+        frozenBy: action.frozenBy,
+        frozenAt: Date.now(),
+      };
+      return {
+        ...state,
+        projects: state.projects.map((p) =>
+          p.id === action.projectId
+            ? { ...p, status: "FROZEN" as const, modFrozen: true, frozenVersion: action.version, frozenReason: action.reason, frozenAt: Date.now(), updatedAt: Date.now() }
+            : p,
+        ),
+        freezeHistory: { ...state.freezeHistory, [freezeEntry.id]: freezeEntry },
+      };
+    }
+
+    // Test Data
+    case "ADD_TEST_DATA_ENTRY":
+      return {
+        ...state,
+        testDataEntries: { ...state.testDataEntries, [action.entry.id]: action.entry },
+      };
+    case "REMOVE_TEST_DATA_ENTRY": {
+      const newTDE = { ...state.testDataEntries };
+      delete newTDE[action.id];
+      return { ...state, testDataEntries: newTDE };
+    }
+
+    // Automation Results
+    case "ADD_AUTOMATION_RESULTS": {
+      const newAR = { ...state.automationResults };
+      for (const r of action.results) {
+        newAR[r.id] = r;
+      }
+      return { ...state, automationResults: newAR };
     }
 
     // Reset
@@ -458,6 +514,9 @@ function reducer(state: ModernizationState, action: ModernizationAction): Modern
         stepExecutions: filterByProject(state.stepExecutions),
         testEvidence: filterByProject(state.testEvidence),
         defects: filterByProject(state.defects),
+        freezeHistory: filterByProject(state.freezeHistory),
+        testDataEntries: filterByProject(state.testDataEntries),
+        automationResults: filterByProject(state.automationResults),
       };
     }
 

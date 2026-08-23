@@ -53,6 +53,10 @@ const PROJECT_NAV_ITEMS: NavItem[] = [
   { label: "Automation Cases", path: "/automation-cases", icon: Bug },
   { label: "Test Cycles", path: "/test-cycles", icon: TestTube },
   { label: "Test Reports", path: "/reports", icon: BarChart3 },
+  { label: "Freeze", path: "/freeze", icon: Shield },
+  { label: "Coverage", path: "/coverage", icon: BarChart3 },
+  { label: "Traceability", path: "/traceability", icon: FileSearch },
+  { label: "Test Data", path: "/test-data", icon: ClipboardList },
 ];
 
 export default function ModLayout({ children }: { children: React.ReactNode }) {

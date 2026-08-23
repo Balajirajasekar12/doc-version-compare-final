@@ -26,6 +26,12 @@ const ModAutomationCases = lazy(() => import("./pages/ModAutomationCases"));
 const ModTestCycles = lazy(() => import("./pages/ModTestCycles"));
 const ModReports = lazy(() => import("./pages/ModReports"));
 const ModSettings = lazy(() => import("./pages/ModSettings"));
+const ModFreeze = lazy(() => import("./pages/ModFreeze"));
+const ModSourceViewer = lazy(() => import("./pages/ModSourceViewer"));
+const ModCoverage = lazy(() => import("./pages/ModCoverage"));
+const ModTraceability = lazy(() => import("./pages/ModTraceability"));
+const ModTestData = lazy(() => import("./pages/ModTestData"));
+const ModAutomationResults = lazy(() => import("./pages/ModAutomationResults"));
 
 function PageLoading() {
   return (
@@ -57,6 +63,12 @@ export default function ModernizationApp() {
             <Route path="project/:projectId/test-cycles" element={<ModTestCycles />} />
             <Route path="project/:projectId/test-cycles/:cycleId" element={<ModTestCycles />} />
             <Route path="project/:projectId/reports" element={<ModReports />} />
+            <Route path="project/:projectId/freeze" element={<ModFreeze />} />
+            <Route path="project/:projectId/source/:fileId" element={<ModSourceViewer />} />
+            <Route path="project/:projectId/coverage" element={<ModCoverage />} />
+            <Route path="project/:projectId/traceability" element={<ModTraceability />} />
+            <Route path="project/:projectId/test-data" element={<ModTestData />} />
+            <Route path="project/:projectId/test-cycles/:cycleId/automation-results" element={<ModAutomationResults />} />
           </Routes>
         </Suspense>
       </ModLayout>
