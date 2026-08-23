@@ -184,6 +184,16 @@ function parseRtf(arrayBuffer: ArrayBuffer): string[] {
 }
 
 function parseSheet(arrayBuffer: ArrayBuffer, ext: "xlsx" | "xls" | "csv"): SheetData[] {
+  // Validate magic bytes for non-CSV spreadsheet formats
+  if (ext !== "csv") {
+    const magic = detectFormatByMagicBytes(arrayBuffer);
+    if (magic === "rtf") {
+      throw new Error("This file appears to be an RTF document but has a spreadsheet extension. Please rename it with the correct extension.");
+    }
+    if (magic === "pdf") {
+      throw new Error("This file appears to be a PDF document but has a spreadsheet extension. Please rename it with the correct extension.");
+    }
+  }
   // CSV has no magic bytes — hand it to SheetJS as text for reliable detection.
   const workbook =
     ext === "csv"

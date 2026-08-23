@@ -91,66 +91,98 @@ function isPipeTableRow(line: string): boolean {
  *   Field | Value
  *   Account | 1001
  *   Customer | Customer Beta
- */
-function normalizeCellLines(inputLines: string[]): string[] {
+ */function normalizeCellLines(inputLines: string[]): string[] {
   const result: string[] = [];
   let i = 0;
+
+  // Lenient key-like check for table DETECTION (not header identification).
+  // Accepts dates (2021-06-15), numbers (1000), multi-word keys, etc.
+  function isKeyLike(s: string): boolean {
+    return s.length > 0 && s.length < 50 &&
+      /^[A-Za-z]/.test(s) &&
+      !s.includes(":") && !s.includes("|");
+  }
+  // Strict alpha check for HEADER identification only.
+  function isAlphaKey(s: string): boolean {
+    return s.length > 0 && s.length < 30 &&
+      /^[A-Za-z][A-Za-z ]*$/.test(s) &&
+      !s.includes(":") && !s.includes("|");
+  }
+  // A value line is non-empty and reasonable length.
+  function isValue(s: string): boolean {
+    return s.length > 0 && s.length < 80 &&
+      !s.includes(":") && !s.includes("|");
+  }
 
   while (i < inputLines.length) {
     const trimmed = inputLines[i].trim();
 
     // Check if this could be a 2-column table header:
-    // A short alpha-only line followed by another short alpha-only line
-    // that looks like column names (e.g., "Field" then "Value")
-    if (
-      i + 1 < inputLines.length &&
-      trimmed.length > 0 && trimmed.length < 30 &&
-      /^[A-Za-z][A-Za-z ]*$/.test(trimmed) &&
-      !trimmed.includes(":") &&
-      !trimmed.includes("|")
-    ) {
+    // Two consecutive alpha-only lines (strict check for header).
+    if (i + 1 < inputLines.length && isAlphaKey(trimmed)) {
       const nextTrimmed = inputLines[i + 1].trim();
-      if (
-        nextTrimmed.length > 0 && nextTrimmed.length < 30 &&
-        /^[A-Za-z][A-Za-z ]*$/.test(nextTrimmed) &&
-        !nextTrimmed.includes(":") &&
-        !nextTrimmed.includes("|")
-      ) {
-        // Could be a header pair. Check if the following lines form
-        // an alternating key-value pattern.
-        let isTable = true;
-        let rowIdx = i + 2;
+      if (isAlphaKey(nextTrimmed)) {
+        // Scan forward to find how many consecutive key-value pairs exist.
+        // Stop at the first pair that doesn't look like key-value,
+        // or when we run out of lines.  This is resilient to trailing
+        // paragraphs that always appear in real documents.
         let rowCount = 0;
+        let rowIdx = i + 2;
+        let naturalEnd = true;
         while (rowIdx + 1 < inputLines.length) {
           const k = inputLines[rowIdx].trim();
           const v = inputLines[rowIdx + 1].trim();
-          if (k === "" || v === "") {
-            isTable = false;
-            break;
-          }
-          // Key should be short-ish alpha text, value can be anything
-          if (k.length > 50 || /^[\d.]+$/.test(k)) {
-            isTable = false;
-            break;
-          }
+          if (k === "" || v === "") { naturalEnd = false; break; }
+          if (!isKeyLike(k)) { naturalEnd = false; break; }
           rowCount++;
           rowIdx += 2;
         }
 
-        if (rowCount >= 1 && isTable) {
-          // Convert to pipe-delimited rows
+        if (rowCount >= 1 && (naturalEnd || rowCount >= 2)) {
+          // Convert to pipe-delimited rows using lenient key check
           result.push(`${trimmed} | ${nextTrimmed}`);
           rowIdx = i + 2;
           while (rowIdx + 1 < inputLines.length) {
             const k = inputLines[rowIdx].trim();
             const v = inputLines[rowIdx + 1].trim();
             if (k === "" || v === "") break;
-            if (k.length > 50 || /^[\d.]+$/.test(k)) break;
+            if (!isKeyLike(k)) break;
             result.push(`${k} | ${v}`);
             rowIdx += 2;
           }
           i = rowIdx;
           continue;
+        }
+
+        // Fallback: if second line is NOT alpha (e.g. unicode value like
+        // "Jose Garcia"), try treating current line as KEY and next as VALUE.
+        // This handles tables without a header row.
+        if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
+          let fallbackCount = 0;
+          let fbIdx = i + 2;
+          let fbEnd = true;
+          while (fbIdx + 1 < inputLines.length) {
+            const k = inputLines[fbIdx].trim();
+            const v = inputLines[fbIdx + 1].trim();
+            if (k === "" || v === "") { fbEnd = false; break; }
+            if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
+            fallbackCount++;
+            fbIdx += 2;
+          }
+          if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
+            result.push(`${trimmed} | ${nextTrimmed}`);
+            fbIdx = i + 2;
+            while (fbIdx + 1 < inputLines.length) {
+              const k = inputLines[fbIdx].trim();
+              const v = inputLines[fbIdx + 1].trim();
+              if (k === "" || v === "") break;
+              if (!isKeyLike(k)) break;
+              result.push(`${k} | ${v}`);
+              fbIdx += 2;
+            }
+            i = fbIdx;
+            continue;
+          }
         }
       }
     }

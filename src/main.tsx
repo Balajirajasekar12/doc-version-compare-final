@@ -13,8 +13,9 @@ const Auth = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
+
 // MIP is lazy-loaded only when the URL hash starts with #/mip
-const MipApp = lazy(() => import("../modernization-platform/src/modernization/ModernizationApp"));
+const MipApp = lazy(() => import("./mip/layout.tsx"));
 
 // Simple loading fallback
 function RouteLoading() {
