@@ -1524,15 +1524,20 @@ export function compareCanonical(
       if (usedComp.has(cIdx)) continue;
       const paraNorm = normalizeValue(cEl.value, mode).toLowerCase();
       const valNorm = normalizeValue(bEl.value, mode).toLowerCase();
-      if (valNorm.length > 0 && paraNorm.endsWith(valNorm)) {
+      // Phase 8a: Match if paragraph ends with value AND contains the field key.
+      // CRITICAL: Do NOT match by value alone — two different fields can share
+      // the same value (e.g., Client Name = Borough Of Ridgway and
+      // Bill Account Name = Borough Of Ridgway). Matching by value alone
+      // hides genuine missing fields.
+      const keyInPara = paraNorm.includes(bEl.key) || paraNorm.includes(normalizeKey(bEl.label));
+      if (valNorm.length > 0 && paraNorm.endsWith(valNorm) && keyInPara) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
         usedComp.add(cIdx);
         break;
       }
-      // Also match if paragraph is just the field KEY
-      const keyInPara = paraNorm.includes(bEl.key) || paraNorm.includes(normalizeKey(bEl.label));
+      // Phase 8b: Match if paragraph is just the field KEY
       if (keyInPara && paraNorm === bEl.key) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
@@ -1611,6 +1616,36 @@ export function compareCanonical(
 
   const missingInComparing = allUnmatchedBaseline.filter(item => {
     if (item.kind !== "field_value" && item.kind !== "heading") return false;
+
+    // SUPPRESS WATERMARK/HEADER FALSE FIELD_VALUES.
+    // PDF parsers sometimes pair watermark text ("Proof", "Draft"), header text
+    // ("August", "HIGHMARK"), or date fragments ("07 31 2026") with adjacent
+    // content as field_value items. These create false differences.
+    //
+    // Rule 1: If key is a single short word (≤8 chars) AND another field_value
+    // has the same value with a more specific key, suppress this one.
+    // (e.g., "Proof" suppressed in favor of "Client Name" for same value)
+    //
+    // Rule 2: If key is a date fragment (digits/spaces only like "07 31 2026")
+    // or a month name, suppress it — these are parser artifacts, not field labels.
+    const MONTH_NAMES = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+    const keyParts = item.key.split(/\s+/);
+    const isDateFragment = /^\d+(\s+\d+)+$/.test(item.key);
+    const isMonthName = keyParts.length === 1 && MONTH_NAMES.includes(item.key);
+    if (isDateFragment || isMonthName) {
+      return false; // suppress date fragments and month names
+    }
+    if (keyParts.length === 1 && item.key.length <= 8 && item.value.length > 5) {
+      const itemValNorm = normalizeText(item.value).toLowerCase();
+      const hasMoreSpecificKey = allUnmatchedBaseline.some(other =>
+        other !== item &&
+        other.kind === "field_value" &&
+        normalizeText(other.value).toLowerCase() === itemValNorm &&
+        (other.key.length > item.key.length || other.key.split(/\s+/).length > 1)
+      );
+      if (hasMoreSpecificKey) return false; // suppress this false positive
+    }
+
     // Report only if the value is genuinely absent from the comparing document.
     return !consume(comparingValueCounts, item.value);
   });
