@@ -142,8 +142,8 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
     const s = segment.trim();
     if (s === "") return null;
 
-    // Colon-separated: "Field: Value"
-    const colonMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(s);
+    // Colon-separated: "Field: Value" (field may start with digit for dates like 03/26)
+    const colonMatch = /^([A-Za-z0-9][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(s);
     if (colonMatch) {
       const val = colonMatch[2].trim();
       if (val.includes("|")) return null;
@@ -151,19 +151,19 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
     }
 
     // Equals-separated: "Field = Value"
-    const equalsMatch = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(s);
+    const equalsMatch = /^([A-Za-z0-9][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(s);
     if (equalsMatch) {
       return { field: equalsMatch[1].trim(), value: equalsMatch[2].trim() };
     }
 
     // Space-separated with 2+ spaces: "Field  Value"
-    // Field can contain letters, spaces, &, /, -, (, ) for business content
+    // Field can contain letters, digits, spaces, &, /, -, (, ) for business content
     // like "Paid Claims & Expenses", "Other Fees & Charges", "03/26 Total"
-    const spaceGapMatch = /^([A-Za-z][A-Za-z0-9 &,/\-().]{0,30}?)\s{2,}(.+)$/.exec(s);
+    const spaceGapMatch = /^([A-Za-z0-9][A-Za-z0-9 &,/\-().]{0,30}?)\s{2,}(.+)$/.exec(s);
     if (spaceGapMatch) {
       const field = spaceGapMatch[1].trim();
       const value = spaceGapMatch[2].trim();
-      if (field.length > 0 && field.length <= 40 && /^[A-Za-z]/.test(field) && !/^\d+$/.test(field)) {
+      if (field.length > 0 && field.length <= 40 && /^[A-Za-z0-9]/.test(field) && !/^\d+$/.test(field)) {
         const isHeader = field.length <= 5 && value.length <= 5 &&
           /^[A-Za-z][A-Za-z ]*$/.test(field) && /^[A-Za-z][A-Za-z ]*$/.test(value);
         if (!isHeader) return { field, value };
@@ -173,15 +173,15 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
     // Single-space separated: "Field Value" where value is numeric
     // Catches PDF table rows like "Account 1000" or "Customer Since 2021-06-15"
     // where the parser didn't insert pipes and the gap is only one space.
-    const singleSpaceMatch = /^([A-Za-z][A-Za-z0-9 &,/\-().]{0,30}?)\s(.+)$/.exec(s);
+    const singleSpaceMatch = /^([A-Za-z0-9][A-Za-z0-9 &,/\-().]{0,30}?)\s(.+)$/.exec(s);
     if (singleSpaceMatch) {
       const field = singleSpaceMatch[1].trim();
       const value = singleSpaceMatch[2].trim();
-      // Only match when the value is purely numeric (digits, commas, dots, hyphens, colons)
+      // Only match when the value is numeric, currency, or date-like
       // This prevents leaking parser artifacts like "onttbl 0 Arial;"
       if (field.length > 0 && field.length <= 40 && field.length >= 3 &&
-        /^[A-Za-z]/.test(field) && !/^\d+$/.test(field) &&
-        /^[0-9][0-9,.:\-/]*$/.test(value)) {
+        /^[A-Za-z0-9]/.test(field) && !/^\d+$/.test(field) &&
+        /^[$0-9(-][0-9,.:\-/$]*$/.test(value)) {
         return { field, value };
       }
     }
@@ -284,8 +284,10 @@ function normalizeCellLines(inputLines: string[]): string[] {
   // These are TWO lines that together form paired field/value columns.
   // Strategy: detect when line N is all-labels and line N+1 is all-values
   // with matching column counts, then emit them as pipe-delimited pairs.
+  // Allow common business characters in labels: & / - ( ) and digits (for dates like 03/26)
+  // Must contain at least one alpha character (prevents pure digit strings like "1000" from being labels)
   const isLabelSeg = (s: string) =>
-    /^[A-Za-z][A-Za-z]*([ ][A-Za-z]+)*$/.test(s) && s.length >= 2 && s.length <= 50;
+    /^[A-Za-z0-9][A-Za-z0-9 &/\-().]*$/.test(s) && /[A-Za-z]/.test(s) && s.length >= 2 && s.length <= 50;
   const hasNonLabel = (segs: string[]) => segs.some(s => !isLabelSeg(s));
   const tabProcessed: string[] = [];
   let skipNext = false;
@@ -304,19 +306,40 @@ function normalizeCellLines(inputLines: string[]): string[] {
           if (nextTrimmed.includes("\t")) {
             const nextSegs = nextTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
             if (nextSegs.length === segs.length && hasNonLabel(nextSegs)) {
-              // Found a header row followed by a data row.
-              // Emit header as a single pipe-delimited line (multi-column).
-              tabProcessed.push(segs.join(" | "));
-              // Also consume subsequent data rows that have the same column count.
-              // This handles tables with 1 header + N data rows.
+              // Found a header row followed by data row(s).
+              const numCols = segs.length;
+              const dataRows: string[][] = [nextSegs];
               let dataIdx = li + 1;
               while (dataIdx < inputLines.length) {
                 const dataTrimmed = inputLines[dataIdx].trim();
                 if (!dataTrimmed.includes("\t")) break;
                 const dataSegs = dataTrimmed.split("\t").map(s => s.trim()).filter(s => s !== "");
-                if (dataSegs.length !== segs.length) break;
-                tabProcessed.push(dataSegs.join(" | "));
+                if (dataSegs.length !== numCols) break;
+                dataRows.push(dataSegs);
                 dataIdx++;
+              }
+              if (numCols >= 3) {
+                // 3+ columns: PAIR column-by-column.
+                // e.g., "Client Number | Client Name | Invoice Number"
+                //   + "016543 | B of Ridgway | 260804584270"
+                // → "Client Number | 016543", "Client Name | B of Ridgway", etc.
+                for (const dataRow of dataRows) {
+                  for (let col = 0; col < numCols; col++) {
+                    const header = segs[col];
+                    const value = dataRow[col];
+                    if (header && value) {
+                      tabProcessed.push(`${header} | ${value}`);
+                    }
+                  }
+                }
+              } else {
+                // 2 columns: row-by-row pipe-delimited.
+                // e.g., "Field | Value", "Account | 1000", "Customer | Alpha"
+                // Each row is an independent field/value pair.
+                tabProcessed.push(segs.join(" | "));
+                for (const dataRow of dataRows) {
+                  tabProcessed.push(dataRow.join(" | "));
+                }
               }
               // Skip all consumed lines
               li = dataIdx - 1; // -1 because for loop will increment
@@ -356,18 +379,18 @@ function normalizeCellLines(inputLines: string[]): string[] {
         return { field: parts[0], value: parts[1] };
       }
     }
-    // Colon-separated
-    const colonM = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(line);
+    // Colon-separated (allow digit-starting fields like 03/26)
+    const colonM = /^([A-Za-z0-9][A-Za-z0-9 _/().\-&'*]+?)\s*:\s*(.+)$/.exec(line);
     if (colonM) return { field: colonM[1].trim(), value: colonM[2].trim() };
     // Equals-separated
-    const eqM = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(line);
+    const eqM = /^([A-Za-z0-9][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(line);
     if (eqM) return { field: eqM[1].trim(), value: eqM[2].trim() };
     // Space-separated: "Field    Value" (2+ spaces)
-    const spM = /^([A-Za-z][A-Za-z0-9 &,/\-().]{0,30}?)\s{2,}(.+)$/.exec(line);
+    const spM = /^([A-Za-z0-9][A-Za-z0-9 &,/\-().]{0,30}?)\s{2,}(.+)$/.exec(line);
     if (spM) {
       const f = spM[1].trim();
       const v = spM[2].trim();
-      if (f.length > 0 && f.length <= 40 && /^[A-Za-z]/.test(f) && !/^\d+$/.test(f)) {
+      if (f.length > 0 && f.length <= 40 && /^[A-Za-z0-9]/.test(f) && !/^\d+$/.test(f)) {
         return { field: f, value: v };
       }
     }
