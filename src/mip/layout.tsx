@@ -2,8 +2,8 @@
 // MIP Layout - Dark sidebar navigation + content area
 // ============================================================
 
-import React, { Suspense, useState } from "react";
-import { Outlet, useNavigate, useLocation } from "react-router";
+import React, { Suspense, useMemo, useState } from "react";
+import { useNavigate, useLocation } from "react-router";
 import { MipProvider, useMip } from "./context";
 import {
   LayoutDashboard,
@@ -34,30 +34,99 @@ import {
   Loader2,
 } from "lucide-react";
 
+// --- Lazy page imports ---
+const MipLanding = React.lazy(() => import("./pages/MipLanding.tsx"));
+const MipUpload = React.lazy(() => import("./pages/UploadPage.tsx"));
+const MipInventory = React.lazy(() => import("./pages/InventoryPage.tsx"));
+const MipAnalysis = React.lazy(() => import("./pages/AnalysisPage.tsx"));
+const MipFindings = React.lazy(() => import("./pages/FindingsPage.tsx"));
+const MipRules = React.lazy(() => import("./pages/RulesPage.tsx"));
+const MipKnowledge = React.lazy(() => import("./pages/KnowledgePage.tsx"));
+const MipEvidenceReq = React.lazy(() => import("./pages/EvidenceRequestsPage.tsx"));
+const MipFreeze = React.lazy(() => import("./pages/FreezePage.tsx"));
+const MipTestDesign = React.lazy(() => import("./pages/TestDesignPage.tsx"));
+const MipTestCases = React.lazy(() => import("./pages/TestCasesPage.tsx"));
+const MipAutomation = React.lazy(() => import("./pages/AutomationPage.tsx"));
+const MipTestData = React.lazy(() => import("./pages/TestDataPage.tsx"));
+const MipTraceability = React.lazy(() => import("./pages/TraceabilityPage.tsx"));
+const MipCoverage = React.lazy(() => import("./pages/CoveragePage.tsx"));
+const MipExecution = React.lazy(() => import("./pages/ExecutionPage.tsx"));
+const MipEvidence = React.lazy(() => import("./pages/EvidencePage.tsx"));
+const MipReports = React.lazy(() => import("./pages/ReportsPage.tsx"));
+const MipSettings = React.lazy(() => import("./pages/SettingsPage.tsx"));
+
+function renderPage(pathname: string) {
+  // Strip /mip prefix if present (HashRouter basename)
+  const path = pathname.replace(/^\/mip/, "") || "/";
+  switch (path) {
+    case "/":
+    case "/projects":
+      return <MipLanding />;
+    case "/upload":
+      return <MipUpload />;
+    case "/inventory":
+      return <MipInventory />;
+    case "/analysis":
+      return <MipAnalysis />;
+    case "/findings":
+      return <MipFindings />;
+    case "/rules":
+      return <MipRules />;
+    case "/knowledge":
+      return <MipKnowledge />;
+    case "/evidence-requests":
+      return <MipEvidenceReq />;
+    case "/freeze":
+      return <MipFreeze />;
+    case "/test-design":
+      return <MipTestDesign />;
+    case "/test-cases":
+      return <MipTestCases />;
+    case "/automation":
+      return <MipAutomation />;
+    case "/test-data":
+      return <MipTestData />;
+    case "/traceability":
+      return <MipTraceability />;
+    case "/coverage":
+      return <MipCoverage />;
+    case "/execution":
+      return <MipExecution />;
+    case "/evidence":
+      return <MipEvidence />;
+    case "/reports":
+      return <MipReports />;
+    case "/settings":
+      return <MipSettings />;
+    default:
+      return <MipLanding />;
+  }
+}
+
 // --- Navigation items ---
 const NAV_ITEMS = [
-  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, path: "/mip" },
-  { id: "projects", label: "Projects", icon: FolderKanban, path: "/mip/projects" },
-  { id: "upload", label: "Upload", icon: Upload, path: "/mip/upload" },
-  { id: "inventory", label: "Source Inventory", icon: ListTree, path: "/mip/inventory" },
-  { id: "analysis", label: "System Analysis", icon: GitCompareArrows, path: "/mip/analysis" },
-  { id: "findings", label: "Findings", icon: AlertTriangle, path: "/mip/findings" },
-  { id: "rules", label: "Rules", icon: BookOpen, path: "/mip/rules" },
-  { id: "knowledge", label: "Knowledge", icon: BrainCircuit, path: "/mip/knowledge" },
-  { id: "evidence-req", label: "Evidence Requests", icon: FileQuestion, path: "/mip/evidence-requests" },
-  { id: "freeze", label: "Freeze", icon: Snowflake, path: "/mip/freeze" },
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, path: "/" },
+  { id: "projects", label: "Projects", icon: FolderKanban, path: "/projects" },
+  { id: "upload", label: "Upload", icon: Upload, path: "/upload" },
+  { id: "inventory", label: "Source Inventory", icon: ListTree, path: "/inventory" },
+  { id: "analysis", label: "System Analysis", icon: GitCompareArrows, path: "/analysis" },
+  { id: "findings", label: "Findings", icon: AlertTriangle, path: "/findings" },
+  { id: "rules", label: "Rules", icon: BookOpen, path: "/rules" },
+  { id: "knowledge", label: "Knowledge", icon: BrainCircuit, path: "/knowledge" },
+  { id: "evidence-req", label: "Evidence Requests", icon: FileQuestion, path: "/evidence-requests" },
+  { id: "freeze", label: "Freeze", icon: Snowflake, path: "/freeze" },
   { id: "divider", label: "TESTING", icon: null, path: "" },
-  { id: "test-design", label: "Test Design", icon: TestTubeDiagonal, path: "/mip/test-design" },
-  { id: "test-cases", label: "Test Cases", icon: TestTubes, path: "/mip/test-cases" },
-  { id: "automation", label: "Automation", icon: Bot, path: "/mip/automation" },
-  { id: "test-data", label: "Test Data", icon: Database, path: "/mip/test-data" },
-  { id: "traceability", label: "Traceability", icon: Link2, path: "/mip/traceability" },
-  { id: "coverage", label: "Coverage", icon: BarChart3, path: "/mip/coverage" },
+  { id: "test-design", label: "Test Design", icon: TestTubeDiagonal, path: "/test-design" },
+  { id: "test-cases", label: "Test Cases", icon: TestTubes, path: "/test-cases" },
+  { id: "automation", label: "Automation", icon: Bot, path: "/automation" },
+  { id: "test-data", label: "Test Data", icon: Database, path: "/test-data" },
+  { id: "traceability", label: "Traceability", icon: Link2, path: "/traceability" },
+  { id: "coverage", label: "Coverage", icon: BarChart3, path: "/coverage" },
   { id: "divider2", label: "EXECUTION", icon: null, path: "" },
-  { id: "execution", label: "Test Execution", icon: Play, path: "/mip/execution" },
-  { id: "evidence", label: "Evidence", icon: Camera, path: "/mip/evidence" },
-  { id: "reports", label: "Reports", icon: FileBarChart, path: "/mip/reports" },
-  { id: "settings", label: "Settings", icon: Settings, path: "/mip/settings" },
+  { id: "execution", label: "Test Execution", icon: Play, path: "/execution" },
+  { id: "evidence", label: "Evidence", icon: Camera, path: "/evidence" },
+  { id: "reports", label: "Reports", icon: FileBarChart, path: "/reports" },
+  { id: "settings", label: "Settings", icon: Settings, path: "/settings" },
 ];
 
 function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
@@ -66,8 +135,8 @@ function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => 
   const { currentProject, state } = useMip();
 
   const isActive = (path: string) => {
-    if (path === "/mip") return location.pathname === "/mip" || location.pathname === "/mip/";
-    return location.pathname.startsWith(path);
+    if (path === "/") return location.pathname === "/" || location.pathname === "";
+    return location.pathname === path || location.pathname.startsWith(path + "/");
   };
 
   return (
@@ -232,7 +301,7 @@ function MipLayoutInner() {
               </div>
             }
           >
-            <Outlet />
+            {renderPage(location.pathname)}
           </Suspense>
         </main>
       </div>
