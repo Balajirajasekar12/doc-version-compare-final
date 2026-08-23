@@ -101,6 +101,31 @@ export function normalizeValue(value: string, mode: ComparisonMode): string {
   return normalizeText(value);
 }
 
+/**
+ * Canonicalize a value for cross-format equivalence checks. Position- and
+ * layout-independent: two values that a human would read as "the same data"
+ * produce the same canonical string, regardless of which format/line they came
+ * from.
+ *
+ * - Collapses whitespace and lowercases (via normalizeText).
+ * - For money/number-like strings, strips currency symbols, thousands
+ *   separators and spaces, and drops insignificant trailing decimal zeros, so
+ *   "$1,234.50" === "1234.5" and "333.00" === "333".
+ * - Leading zeros on integers are PRESERVED (so IDs like "016543" stay distinct
+ *   from "16543").
+ */
+export function canonicalValue(value: string): string {
+  const base = normalizeText(value).toLowerCase();
+  const stripped = base.replace(/[$,\s%]/g, "");
+  if (/^[-+]?\d+(\.\d+)?$/.test(stripped)) {
+    if (stripped.includes(".")) {
+      return stripped.replace(/0+$/, "").replace(/\.$/, "");
+    }
+    return stripped;
+  }
+  return base;
+}
+
 // ── Canonical Content Extraction ────────────────────────────────────────────
 
 /**
@@ -379,7 +404,7 @@ function normalizeCellLines(inputLines: string[]): string[] {
         if (peekIdx + 1 < tabProcessed.length) {
           const peekKey = tabProcessed[peekIdx].trim();
           const peekVal = tabProcessed[peekIdx + 1].trim();
-          if (isKey(peekKey) && !isKey(peekVal) && isValue(peekVal)) {
+          if (isKey(peekKey) && (peekVal.length > peekKey.length || !isKey(peekVal)) && isValue(peekVal)) {
             // Found at least 2 consecutive key-value pairs — collect them all
             const pairs: string[] = [`${trimmed} | ${nextTrimmed}`];
             let rowIdx = i + 2;
@@ -1111,6 +1136,23 @@ export function toCanonical(doc: ParsedDoc): CanonicalDocument {
   // Deduplicate before returning
   const items = deduplicateItems(rawItems);
 
+  // Post-process: fix reversed field_value pairs.
+  // The PDF parser joins text items by stream order, not visual order.
+  // This causes pairs like:
+  //   key="product sub group 8 digit" value="Sort Description:"
+  // when the correct representation is:
+  //   key="sort description" value="Product/Sub Group-8 Digit"
+  // Detection: value ends with ':' but label doesn't → swap them.
+  for (const item of items) {
+    if (item.kind === "field_value" && item.value.endsWith(":") && !item.label.endsWith(":")) {
+      const oldLabel = item.label;
+      const oldValue = item.value;
+      item.label = oldValue.replace(/:\s*$/, "").trim();
+      item.value = oldLabel;
+      item.key = normalizeKey(item.label);
+    }
+  }
+
   return { source: doc, items };
 }
 
@@ -1511,131 +1553,70 @@ export function compareCanonical(
   const allUnmatchedBaseline = Array.from(unmatchedBaseline).map(i => baseline.items[i]);
   const allUnmatchedComparing = Array.from(unmatchedComparing).map(i => comparing.items[i]);
 
-  // Build a set of normalized values that are already covered by matched items
-  const matchedValues = new Set<string>();
-  const matchedKeys = new Set<string>();
+  // POSITION/LAYOUT-INDEPENDENT REPORTING.
+  //
+  // The canonical model matches by key/value, NEVER by line number, so content
+  // that merely moved (e.g. on line 1 in the PDF but line 2 in the DOCX) is not
+  // a difference. Here we also make the *reporting* of unmatched field_value/
+  // heading items value-aware.
+  //
+  // The same datum routinely appears under a different KEY across formats:
+  // repeated subtotal rows keyed "group #1/#2/#3", fields re-keyed by a table
+  // flattener, header/metadata rows, etc. If an unmatched field's VALUE is
+  // still present somewhere in the other document, it is the same data laid out
+  // differently — a layout artifact, not a data difference — so we suppress it.
+  // Only values that are genuinely ABSENT from the other document are reported.
+  //
+  // We use a multiset (value -> count) so a value that appears N times must be
+  // present N times to be fully suppressed; the (N+1)-th occurrence with no
+  // counterpart is reported. Values consumed by genuine matches are removed
+  // first, so a value used in a real match can't also mask a missing item.
+  //
+  // Non-field_value items (paragraphs, list_items, table_cells) remain
+  // structural/formatting content and are never reported as data differences.
+
+  function buildValueCounts(items: ContentItem[]): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const it of items) {
+      const v = canonicalValue(it.value);
+      if (v === "") continue;
+      counts.set(v, (counts.get(v) ?? 0) + 1);
+    }
+    return counts;
+  }
+  const comparingValueCounts = buildValueCounts(comparing.items);
+  const baselineValueCounts = buildValueCounts(baseline.items);
+
+  // Remove values already accounted for by genuine matches.
   for (const m of matched) {
-    matchedValues.add(normalizeValue(m.baseline.value, mode).toLowerCase());
-    matchedValues.add(normalizeValue(m.comparing.value, mode).toLowerCase());
-    matchedKeys.add(m.baseline.key);
-    matchedKeys.add(m.comparing.key);
+    const bv = canonicalValue(m.baseline.value);
+    const cv = canonicalValue(m.comparing.value);
+    if ((baselineValueCounts.get(bv) ?? 0) > 0) baselineValueCounts.set(bv, baselineValueCounts.get(bv)! - 1);
+    if ((comparingValueCounts.get(cv) ?? 0) > 0) comparingValueCounts.set(cv, comparingValueCounts.get(cv)! - 1);
   }
 
-  // A paragraph/list_item is "already represented" if:
-  // 1. Its value matches a matched item's value (same data, different format)
-  // 2. Its key matches a matched item's key AND its value is a substring
-  //    or superstring of the matched value (e.g., "Account: 1001" matches
-  //    field_value key="account" value="1001")
-  // Build a set of normalized labels from matched items
-  const matchedLabels = new Set<string>();
-  for (const m of matched) {
-    matchedLabels.add(normalizeValue(m.baseline.label, mode).toLowerCase());
-    matchedLabels.add(normalizeValue(m.comparing.label, mode).toLowerCase());
-  }
-
-  function isAlreadyRepresented(item: ContentItem): boolean {
-    if (item.kind !== "paragraph" && item.kind !== "list_item" && item.kind !== "table_cell") {
-      return false; // Always report field_value and heading items
-    }
-    const itemVal = normalizeValue(item.value, mode).toLowerCase();
-    const itemKey = item.key;
-
-    // Check 1: exact value match with any matched item
-    if (matchedValues.has(itemVal)) return true;
-
-    // Check 2: value containment — paragraph contains or equals a matched value.
-    for (const m of matched) {
-      const mBaseVal = normalizeValue(m.baseline.value, mode).toLowerCase();
-      const mCompVal = normalizeValue(m.comparing.value, mode).toLowerCase();
-      // Exact match: paragraph text equals a matched item's value
-      if (mBaseVal.length >= 3 && itemVal === mBaseVal) return true;
-      if (mCompVal.length >= 3 && itemVal === mCompVal) return true;
-      // Containment: paragraph is longer than the matched value
-      if (mBaseVal.length >= 3 && itemVal.includes(mBaseVal) && itemVal.length > mBaseVal.length && itemVal.length < 80) return true;
-      if (mCompVal.length >= 3 && itemVal.includes(mCompVal) && itemVal.length > mCompVal.length && itemVal.length < 80) return true;
-    }
-
-    // Check 3: value matches a matched item's label (e.g., standalone "Account"
-    // paragraph matches field_value label "Account")
-    if (matchedLabels.has(itemVal)) return true;
-
-    // Check 4: suppress structural/formatting content that differs between
-    // formats but isn't actual data — titles, footers, metadata, headers.
-    const words = item.value.trim().split(/\s+/);
-
-    // Footer with boilerplate: "Synthetic data - no real PHI."
-    if (/synthetic|no real|\bph\b|\bphi\b/i.test(item.value)) {
+  // Consume one occurrence of a value from the other document's multiset.
+  // Returns true when the value WAS present (so this unmatched item is a layout
+  // artifact and should be suppressed), false when it is genuinely absent.
+  function consume(counts: Map<string, number>, value: string): boolean {
+    const v = canonicalValue(value);
+    if (v === "") return false;
+    const n = counts.get(v) ?? 0;
+    if (n > 0) {
+      counts.set(v, n - 1);
       return true;
     }
-    // Pipe-separated table header: "Transaction ID | Product | ..."
-    if (item.value.includes("|") && words.length >= 3) {
-      return true;
-    }
-    // Pipe-separated metadata line: "Account: 1000 | Synthetic data | No real PHI"
-    if (item.value.includes("|") && item.value.includes(":")) {
-      return true;
-    }
-    // Standalone numeric value (e.g., "1000" from metadata)
-    if (/^[\d,.-]+$/.test(item.value.trim()) && item.value.trim().length <= 20) {
-      return true;
-    }
-    // Short title (≤5 words, ≤40 chars, title-case, no pipes/colons)
-    if (item.value.length <= 40 && words.length <= 5 &&
-        /^[A-Z][a-z]/.test(item.value) &&
-        !/[|:]/.test(item.value)) {
-      return true;
-    }
-    // Standalone short word that's a field label or appears in a matched label
-    if (words.length === 1 && words[0].length <= 15) {
-      const w = words[0].toLowerCase();
-      if (matchedLabels.has(w) || matchedKeys.has(w)) return true;
-      for (const ml of matchedLabels) {
-        if (ml.split(/\s+/).includes(w)) return true;
-      }
-    }
-
     return false;
   }
-
-  // FINAL REPORTING: Only report field_value and heading items as differences.
-  // All unmatched paragraphs, list_items, and table_cells are structural/
-  // formatting differences between formats — NOT data differences.
-  // For real organization documents, the data is identical across formats;
-  // only the layout/rendering differs. Reporting paragraph differences
-  // creates hundreds of false positives.
-  //
-  // Exception: paragraphs whose content does NOT appear in any form in the
-  // other document AND is longer than 20 chars are genuine content additions.
-  const allBaselineValues = new Set(
-    baseline.items.map(i => normalizeValue(i.value, mode).toLowerCase())
-  );
-  const allComparingValues = new Set(
-    comparing.items.map(i => normalizeValue(i.value, mode).toLowerCase())
-  );
 
   const missingInComparing = allUnmatchedBaseline.filter(item => {
-    if (item.kind === "field_value" || item.kind === "heading") {
-      // Phase 1 already matched field_value/heading items by normalized key.
-      // If this item is still unmatched, its key does NOT exist in the comparing doc.
-      // All 8 matching phases have been tried. Report as a genuine difference.
-      // Do NOT suppress based on value matching — two different fields can have
-      // the same value (e.g., Client Name = Borough of Ridgway, Bill Account Name = Borough Of Ridgway).
-      // Do NOT suppress based on substring matching — one value can be a substring of another
-      // (e.g., Client Number = 016543, Bill Account Number = 0165431006).
-      return true;
-    }
-    // Non-field_value items (paragraphs, list_items, table_cells) are structural/formatting.
-    // Suppress them — they differ between formats due to layout, not data.
-    return false;
+    if (item.kind !== "field_value" && item.kind !== "heading") return false;
+    // Report only if the value is genuinely absent from the comparing document.
+    return !consume(comparingValueCounts, item.value);
   });
   const addedInComparing = allUnmatchedComparing.filter(item => {
-    if (item.kind === "field_value" || item.kind === "heading") {
-      // Same logic as missingInComparing: if unmatched after all 8 phases,
-      // it's genuinely new content in the comparing document.
-      return true;
-    }
-    // Non-field_value items are structural — suppress
-    return false;
+    if (item.kind !== "field_value" && item.kind !== "heading") return false;
+    return !consume(baselineValueCounts, item.value);
   });
 
   return { matched, missingInComparing, addedInComparing };

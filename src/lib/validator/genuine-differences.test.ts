@@ -758,15 +758,12 @@ describe("Genuine Differences: RTF alternating lines vs XLSX Field/Value table",
     const rtfItems = toCanonical(rtf);
     const xlsxItems = toCanonical(xlsx);
 
-    // RTF alternating lines: "Account" alone is alpha-only, but "1000" is numeric,
-    // so normalizeCellLines does NOT pair them as a table row. They become paragraphs.
-    // The comparison engine matches them via Phase 7 (paragraph→field_value matching).
-    // So RTF produces 5 field_values (Customer, Region, Account Manager, Status, Customer Since)
-    // plus 2 paragraphs (Account, 1000). XLSX produces 6 field_values.
+    // RTF alternating lines: all 6 key-value pairs are now detected by
+    // normalizeCellLines (including Account/1000). XLSX also produces 6 field_values.
     const rtfFV = rtfItems.items.filter(i => i.kind === "field_value");
     const xlsxFV = xlsxItems.items.filter(i => i.kind === "field_value");
 
-    expect(rtfFV.length).toBe(5);
+    expect(rtfFV.length).toBe(6);
     expect(xlsxFV.length).toBe(6);
 
     // Compare
