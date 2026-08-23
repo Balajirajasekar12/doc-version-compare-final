@@ -250,41 +250,45 @@ function normalizeCellLines(inputLines: string[]): string[] {
           }
           i = rowIdx;
           continue;
-        }
+        }      }
+    }
 
-        // Fallback: if second line is NOT alpha (e.g. unicode value like
-        // "José García"), try treating current line as KEY and next as VALUE.
-        // This handles tables without a header row.
-        if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
-          let fallbackCount = 0;
-          let fbIdx = i + 2;
-          let fbEnd = true;
+    // Fallback for alternating key-value lines where the value is NOT
+    // an alpha key (e.g. "Client Number" → "016543").
+    // This was previously inside the isAlphaKey(nextTrimmed) block,
+    // meaning it only ran when the value WAS an alpha key — a bug.
+    if (i + 1 < inputLines.length && isAlphaKey(trimmed)) {
+      const nextTrimmed = inputLines[i + 1].trim();
+      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
+        let fallbackCount = 0;
+        let fbIdx = i + 2;
+        let fbEnd = true;
+        while (fbIdx + 1 < inputLines.length) {
+          const k = inputLines[fbIdx].trim();
+          const v = inputLines[fbIdx + 1].trim();
+          if (k === "" || v === "") { fbEnd = false; break; }
+          if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
+          fallbackCount++;
+          fbIdx += 2;
+        }
+        if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
+          // Emit without header — first pair is data
+          result.push(`${trimmed} | ${nextTrimmed}`);
+          fbIdx = i + 2;
           while (fbIdx + 1 < inputLines.length) {
             const k = inputLines[fbIdx].trim();
             const v = inputLines[fbIdx + 1].trim();
-            if (k === "" || v === "") { fbEnd = false; break; }
-            if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
-            fallbackCount++;
+            if (k === "" || v === "") break;
+            if (!isKeyLike(k)) break;
+            result.push(`${k} | ${v}`);
             fbIdx += 2;
           }
-          if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
-            // Emit without header — first pair is data
-            result.push(`${trimmed} | ${nextTrimmed}`);
-            fbIdx = i + 2;
-            while (fbIdx + 1 < inputLines.length) {
-              const k = inputLines[fbIdx].trim();
-              const v = inputLines[fbIdx + 1].trim();
-              if (k === "" || v === "") break;
-              if (!isKeyLike(k)) break;
-              result.push(`${k} | ${v}`);
-              fbIdx += 2;
-            }
-            i = fbIdx;
-            continue;
-          }
+          i = fbIdx;
+          continue;
         }
       }
     }
+
 
     result.push(inputLines[i]);
     i++;
@@ -370,45 +374,59 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   const lines = normalizeCellLines(filterArtifactLines(rawLines));
   const items: ContentItem[] = [];
 
-  // First pass: detect pipe-delimited table blocks
-  const pipeLineIndices = new Set<number>();
+  // First pass: detect pipe-delimited AND tab-delimited table blocks.
+  // RTF \cell produces tab-separated rows; PDF extraction may produce
+  // pipe-separated rows. Both must be recognized as table data.
+  const tableLineIndices = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i].trim().includes("|")) {
-      const parts = lines[i].trim().split("|").map(p => p.trim()).filter(p => p !== "");
-      // Only treat as pipe-delimited if first part has no colon.
-      // A line like "Account: 1000 | Synthetic data" has pipes as visual
-      // separators in a sentence, not as table column delimiters.
+    const trimmed = lines[i].trim();
+    // Check for pipe-delimited
+    if (trimmed.includes("|")) {
+      const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
       if (parts.length >= 2 && !parts[0].includes(":")) {
-        pipeLineIndices.add(i);
+        tableLineIndices.add(i);
+      }
+    }
+    // Check for tab-delimited (from RTF \cell, PDF column extraction)
+    else if (trimmed.includes("\t")) {
+      const parts = trimmed.split("\t").map(p => p.trim()).filter(p => p !== "");
+      if (parts.length >= 2 && !parts[0].includes(":")) {
+        tableLineIndices.add(i);
       }
     }
   }
 
-  // Group consecutive pipe lines
-  const pipeBlocks: Array<{ start: number; end: number; rows: string[][] }> = [];
+  // Group consecutive table lines
+  const tableBlocks: Array<{ start: number; end: number; rows: string[][] }> = [];
   let currentBlock: { start: number; end: number; rows: string[][] } | null = null;
   for (let i = 0; i < lines.length; i++) {
-    if (pipeLineIndices.has(i)) {
-      const cells = lines[i].trim().split("|").map(c => c.trim());
+    if (tableLineIndices.has(i)) {
+      const trimmed = lines[i].trim();
+      const cells = trimmed.includes("|")
+        ? trimmed.split("|").map(c => c.trim())
+        : trimmed.split("\t").map(c => c.trim());
+      // For tab-separated rows, filter empty cells to handle sparse tables
+      const filteredCells = cells.filter(c => c !== "");
+      const rowCells = filteredCells.length >= 2 ? filteredCells : cells;
       if (!currentBlock) {
-        currentBlock = { start: i, end: i, rows: [cells] };
+        currentBlock = { start: i, end: i, rows: [rowCells] };
       } else {
         currentBlock.end = i;
-        currentBlock.rows.push(cells);
+        currentBlock.rows.push(rowCells);
       }
     } else {
-      if (currentBlock) { pipeBlocks.push(currentBlock); currentBlock = null; }
+      if (currentBlock) { tableBlocks.push(currentBlock); currentBlock = null; }
     }
   }
-  if (currentBlock) pipeBlocks.push(currentBlock);
+  if (currentBlock) tableBlocks.push(currentBlock);
 
-  const pipeTableLines = new Set<number>();
-  for (const block of pipeBlocks) {
-    for (let i = block.start; i <= block.end; i++) pipeTableLines.add(i);
+  const tableLineSet = new Set<number>();
+  for (const block of tableBlocks) {
+    for (let i = block.start; i <= block.end; i++) tableLineSet.add(i);
   }
 
-  // Process pipe table blocks
-  for (const block of pipeBlocks) {
+  // Process table blocks
+  for (const block of tableBlocks) {
     const firstRow = block.rows[0];
     // Only treat as header if there are at least 2 rows
     // (header + at least one data row). A single-row table is data, not header.
@@ -451,7 +469,7 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
 
   // Process remaining lines (not in pipe tables)
   for (let i = 0; i < lines.length; i++) {
-    if (pipeTableLines.has(i)) continue;
+    if (tableLineSet.has(i)) continue;
     const trimmed = lines[i].trim();
     if (trimmed === "") continue;
     if (/^[|\-+:]+$/.test(trimmed)) continue; // table separator

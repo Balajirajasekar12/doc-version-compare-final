@@ -152,40 +152,42 @@ function isPipeTableRow(line: string): boolean {
           }
           i = rowIdx;
           continue;
-        }
+        }      }
+    }
 
-        // Fallback: if second line is NOT alpha (e.g. unicode value like
-        // "Jose Garcia"), try treating current line as KEY and next as VALUE.
-        // This handles tables without a header row.
-        if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
-          let fallbackCount = 0;
-          let fbIdx = i + 2;
-          let fbEnd = true;
+    // Fallback for alternating key-value lines where the value is NOT
+    // an alpha key (e.g. "Client Number" → "016543").
+    if (i + 1 < inputLines.length && isAlphaKey(trimmed)) {
+      const nextTrimmed = inputLines[i + 1].trim();
+      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
+        let fallbackCount = 0;
+        let fbIdx = i + 2;
+        let fbEnd = true;
+        while (fbIdx + 1 < inputLines.length) {
+          const k = inputLines[fbIdx].trim();
+          const v = inputLines[fbIdx + 1].trim();
+          if (k === "" || v === "") { fbEnd = false; break; }
+          if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
+          fallbackCount++;
+          fbIdx += 2;
+        }
+        if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
+          result.push(`${trimmed} | ${nextTrimmed}`);
+          fbIdx = i + 2;
           while (fbIdx + 1 < inputLines.length) {
             const k = inputLines[fbIdx].trim();
             const v = inputLines[fbIdx + 1].trim();
-            if (k === "" || v === "") { fbEnd = false; break; }
-            if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
-            fallbackCount++;
+            if (k === "" || v === "") break;
+            if (!isKeyLike(k)) break;
+            result.push(`${k} | ${v}`);
             fbIdx += 2;
           }
-          if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
-            result.push(`${trimmed} | ${nextTrimmed}`);
-            fbIdx = i + 2;
-            while (fbIdx + 1 < inputLines.length) {
-              const k = inputLines[fbIdx].trim();
-              const v = inputLines[fbIdx + 1].trim();
-              if (k === "" || v === "") break;
-              if (!isKeyLike(k)) break;
-              result.push(`${k} | ${v}`);
-              fbIdx += 2;
-            }
-            i = fbIdx;
-            continue;
-          }
+          i = fbIdx;
+          continue;
         }
       }
     }
+
 
     result.push(inputLines[i]);
     i++;
