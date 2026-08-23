@@ -254,12 +254,12 @@ function normalizeCellLines(inputLines: string[]): string[] {
     }
 
     // Fallback for alternating key-value lines where the value is NOT
-    // an alpha key (e.g. "Client Number" → "016543").
-    // This was previously inside the isAlphaKey(nextTrimmed) block,
-    // meaning it only ran when the value WAS an alpha key — a bug.
-    if (i + 1 < inputLines.length && isAlphaKey(trimmed)) {
+    // an alpha key (e.g. "Client Number" → "016543" or
+    // "Claims Paid Thru" → "07/31/2026 (Bill Cycle 5 of 5)").
+    if (i + 1 < inputLines.length && isAlphaKey(trimmed) && trimmed.length <= 25) {
       const nextTrimmed = inputLines[i + 1].trim();
-      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
+      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60) {
+        // Scan forward for additional key-value pairs
         let fallbackCount = 0;
         let fbIdx = i + 2;
         let fbEnd = true;
@@ -271,6 +271,12 @@ function normalizeCellLines(inputLines: string[]): string[] {
           fallbackCount++;
           fbIdx += 2;
         }
+
+        // Accept if:
+        // 1. Multiple pairs found (table pattern), OR
+        // 2. Single pair but key is short alpha and value is non-alpha
+        //    (handles standalone fields like "Claims Paid Thru" → "07/31/2026...")
+        const isStandalonePair = fallbackCount === 0 && fbIdx <= i + 2;
         if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
           // Emit without header — first pair is data
           result.push(`${trimmed} | ${nextTrimmed}`);
@@ -284,6 +290,12 @@ function normalizeCellLines(inputLines: string[]): string[] {
             fbIdx += 2;
           }
           i = fbIdx;
+          continue;
+        } else if (isStandalonePair && trimmed.length <= 20 && nextTrimmed.length <= 40 && !/  /.test(nextTrimmed) && !/\t/.test(nextTrimmed)) {
+          // Single standalone pair: short key + short non-alpha value
+          // Exclude values with internal spaces/tabs (already table data)
+          result.push(`${trimmed} | ${nextTrimmed}`);
+          i += 2;
           continue;
         }
       }
@@ -883,6 +895,92 @@ export function compareCanonical(
       unmatchedComparing.delete(cIdx);
       for (const { idx: bIdx } of containedBaseline) {
         unmatchedBaseline.delete(bIdx);
+      }
+    }
+  }
+
+  // Phase 6: Paragraph substring containment matching.
+  // When PDF produces "Claims Paid Thru 07/31/2026 (Bill Cycle 5 of 5)" as
+  // one paragraph but RTF produces "Claims Paid Thru" + "07/31/2026..." as
+  // separate items, the longer paragraph CONTAINS the shorter ones.
+  // Match by checking if any remaining paragraph in one set contains all
+  // the normalized text of one or more remaining items in the other set.
+  const unmatchedBasePara = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }));
+  const unmatchedCompPara = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }));
+
+  // For each unmatched baseline item, find ALL unmatched comparing items
+  // whose normalized text is contained within it.
+  for (const { el: bEl, idx: bIdx } of unmatchedBasePara) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+    if (bNorm.length < 3) continue;
+    const contained: Array<{ el: ContentItem; idx: number }> = [];
+    for (const { el: cEl, idx: cIdx } of unmatchedCompPara) {
+      if (!unmatchedComparing.has(cIdx)) continue;
+      const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+      if (cNorm.length < 2) continue;
+      // Check if the baseline paragraph contains this comparing item's text
+      if (bNorm.includes(cNorm)) {
+        contained.push({ el: cEl, idx: cIdx });
+      }
+    }
+    // Only match if we found at least one containing item
+    // and the combined contained text covers most of the baseline text
+    if (contained.length >= 1) {
+      const combinedContained = contained
+        .map(({ el }) => normalizeValue(el.value, mode).toLowerCase())
+        .join(' ');
+      // Check if the combined contained text is a significant portion
+      // of the baseline text (at least 50% by character count)
+      if (combinedContained.length >= bNorm.length * 0.4) {
+        matched.push({
+          baseline: bEl,
+          comparing: contained[0].el,
+          identical: bNorm === combinedContained,
+        });
+        unmatchedBaseline.delete(bIdx);
+        for (const { idx: cIdx } of contained) {
+          unmatchedComparing.delete(cIdx);
+        }
+      }
+    }
+  }
+
+  // Same in reverse: each comparing paragraph contains baseline items
+  const unmatchedBasePara2 = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }));
+  const unmatchedCompPara2 = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }));
+
+  for (const { el: cEl, idx: cIdx } of unmatchedCompPara2) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+    if (cNorm.length < 3) continue;
+    const contained: Array<{ el: ContentItem; idx: number }> = [];
+    for (const { el: bEl, idx: bIdx } of unmatchedBasePara2) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+      if (bNorm.length < 2) continue;
+      if (cNorm.includes(bNorm)) {
+        contained.push({ el: bEl, idx: bIdx });
+      }
+    }
+    if (contained.length >= 1) {
+      const combinedContained = contained
+        .map(({ el }) => normalizeValue(el.value, mode).toLowerCase())
+        .join(' ');
+      if (combinedContained.length >= cNorm.length * 0.4) {
+        matched.push({
+          baseline: contained[0].el,
+          comparing: cEl,
+          identical: cNorm === combinedContained,
+        });
+        unmatchedComparing.delete(cIdx);
+        for (const { idx: bIdx } of contained) {
+          unmatchedBaseline.delete(bIdx);
+        }
       }
     }
   }

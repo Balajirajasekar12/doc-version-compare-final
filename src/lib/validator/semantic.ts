@@ -156,10 +156,11 @@ function isPipeTableRow(line: string): boolean {
     }
 
     // Fallback for alternating key-value lines where the value is NOT
-    // an alpha key (e.g. "Client Number" → "016543").
-    if (i + 1 < inputLines.length && isAlphaKey(trimmed)) {
+    // an alpha key (e.g. "Client Number" → "016543" or
+    // "Claims Paid Thru" → "07/31/2026 (Bill Cycle 5 of 5)").
+    if (i + 1 < inputLines.length && isAlphaKey(trimmed) && trimmed.length <= 25) {
       const nextTrimmed = inputLines[i + 1].trim();
-      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
+      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60) {
         let fallbackCount = 0;
         let fbIdx = i + 2;
         let fbEnd = true;
@@ -171,6 +172,8 @@ function isPipeTableRow(line: string): boolean {
           fallbackCount++;
           fbIdx += 2;
         }
+
+        const isStandalonePair = fallbackCount === 0 && fbIdx <= i + 2;
         if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
           result.push(`${trimmed} | ${nextTrimmed}`);
           fbIdx = i + 2;
@@ -183,6 +186,10 @@ function isPipeTableRow(line: string): boolean {
             fbIdx += 2;
           }
           i = fbIdx;
+          continue;
+        } else if (isStandalonePair && trimmed.length <= 20 && nextTrimmed.length <= 40 && !/  /.test(nextTrimmed) && !/\t/.test(nextTrimmed)) {
+          result.push(`${trimmed} | ${nextTrimmed}`);
+          i += 2;
           continue;
         }
       }
