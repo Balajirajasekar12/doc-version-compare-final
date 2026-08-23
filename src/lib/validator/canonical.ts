@@ -364,7 +364,16 @@ function normalizeCellLines(inputLines: string[]): string[] {
       // Values like "016543" or "Borough Of Ridgway" (>20 chars) fail isKey,
       // allowing the pairing. But short alpha like "Field" or "Value" pass isKey,
       // preventing false pairing with preceding key-like lines.
-      if (!isKey(nextTrimmed) && isValue(nextTrimmed)) {
+      // SAFETY: Skip if key words are a prefix/subset of value words.
+      // This prevents false pairing of table headers like:
+      //   "Total" + "Total Number of Installment"
+      //   "Billed to Date" + "Total Installments Billed to Date"
+      // These are column headers, not field/value pairs.
+      const keyWords = trimmed.toLowerCase().split(/\s+/);
+      const valWords = nextTrimmed.toLowerCase().split(/\s+/);
+      const keyIsPrefixOfValue = keyWords.every(kw => valWords.includes(kw));
+
+      if (!isKey(nextTrimmed) && isValue(nextTrimmed) && !keyIsPrefixOfValue) {
         // Peek ahead: need at least one more key-value pair after this
         const peekIdx = i + 2;
         if (peekIdx + 1 < tabProcessed.length) {
@@ -510,9 +519,50 @@ function filterArtifactLines(lines: string[]): string[] {
   });
 }
 
+/**
+ * Split concatenated table cells from mammoth (DOCX parser).
+ * Mammoth joins adjacent cells WITHOUT separators:
+ *   "Invoice Number" + "260804584270" → "Invoice Number260804584270"
+ *   "Bill Account Name" + "Borough Of Ridgway" → "Bill Account NameBorough Of Ridgway"
+ *   "Unpaid Advance" + "Balance" → "Unpaid AdvanceBalance"
+ *   "Total" + "Numberof" + "Installment" → "Total Numberof Installment"
+ *
+ * Detection: find boundaries where:
+ *   1. A lowercase letter transitions to an uppercase letter (camelCase word boundary)
+ *   2. A letter transitions to a digit (field-name → numeric-value boundary)
+ * But NOT:
+ *   - Already properly spaced text
+ *   - Common abbreviations (e.g., "PPONumber" → should NOT become "PPO Number")
+ *   - Single uppercase letters within a word
+ */
+function splitConcatenatedCells(line: string): string {
+  // Already has proper separators (colon, pipe, 2+ spaces) — don't touch
+  if (line.includes(":") || line.includes("|") || /\s{2,}/.test(line)) {
+    return line;
+  }
+
+  let result = line;
+
+  // 1. Split camelCase word boundaries: "MonthAugust" → "Month August"
+  //    "AdvanceBalance" → "Advance Balance"
+  //    "InstallmentDue" → "Current Installment Due"
+  result = result.replace(/([a-z])([A-Z])/g, "$1 $2");
+
+  // 2. Split "Numberof" → "Number of" (common mammoth concatenation)
+  result = result.replace(/Numberof/g, "Number of");
+
+  // 3. Split alpha→digit boundaries: "Invoice Number260804584270"
+  //    → "Invoice Number 260804584270"
+  result = result.replace(/([A-Za-z])([0-9])/g, "$1 $2");
+
+  return result;
+}
+
 function textToCanonical(doc: ParsedDoc): ContentItem[] {
   const rawLines = doc.content?.type === "text" ? doc.content.lines : [];
-  const lines = normalizeCellLines(filterArtifactLines(rawLines));
+  // Step 1: Split concatenated cells from mammoth
+  const splitLines = rawLines.map(splitConcatenatedCells);
+  const lines = normalizeCellLines(filterArtifactLines(splitLines));
   const items: ContentItem[] = [];
 
   // First pass: detect pipe-delimited table blocks
@@ -1374,7 +1424,7 @@ export function compareCanonical(
     .map(i => ({ el: baseline.items[i], idx: i }))
     .filter(({ el }) =>
       (el.kind === "paragraph" || el.kind === "list_item") &&
-      !el.value.includes("|") && !el.value.includes(":")
+      !el.value.includes("|")
     );
   const unmatchedKVComparingPhase7 = Array.from(unmatchedComparing)
     .map(i => ({ el: comparing.items[i], idx: i }))
@@ -1424,7 +1474,7 @@ export function compareCanonical(
     .map(i => ({ el: comparing.items[i], idx: i }))
     .filter(({ el }) =>
       (el.kind === "paragraph" || el.kind === "list_item") &&
-      !el.value.includes("|") && !el.value.includes(":")
+      !el.value.includes("|")
     );
 
   for (const { el: bEl, idx: bIdx } of unmatchedKVBaselinePhase8) {
