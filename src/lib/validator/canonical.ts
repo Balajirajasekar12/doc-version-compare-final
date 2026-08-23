@@ -1635,6 +1635,23 @@ export function compareCanonical(
     if (isDateFragment || isMonthName) {
       return false; // suppress date fragments and month names
     }
+
+    // Rule 3: Suppress short PDF internal identifiers.
+    // PDF parsers sometimes extract internal object references like
+    // "PG1" → "KEY_1" or "Obj" → "12 0 R" as field_value pairs.
+    // These are parser artifacts, not business content.
+    // Pattern: key is very short (≤5 chars) with digits/underscores,
+    // OR value is a short identifier-like string (KEY_N, Obj, etc.).
+    const isPdfInternal = (
+      item.key.length <= 5 && /\d/.test(item.key) && /^[A-Za-z0-9_]+$/.test(item.key) &&
+      item.value.length <= 10 && /^[A-Za-z0-9_]+$/.test(item.value)
+    ) ||
+      /^KEY[_\s]?\d+$/i.test(item.value) ||
+      /^PG[_\s]?\d+$/i.test(item.key) ||
+      /^OBJ[_\s]?\d+/i.test(item.key);
+    if (isPdfInternal) {
+      return false; // suppress PDF internal artifacts
+    }
     if (keyParts.length === 1 && item.key.length <= 8 && item.value.length > 5) {
       const itemValNorm = normalizeText(item.value).toLowerCase();
       const hasMoreSpecificKey = allUnmatchedBaseline.some(other =>
