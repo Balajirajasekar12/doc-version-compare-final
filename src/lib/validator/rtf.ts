@@ -187,7 +187,10 @@ function readControl(ctx: Ctx): void {
     return;
   }
   if (word === "cell") {
-    if (ctx.skipDepth === 0) pushNewline(ctx);
+    // RTF \cell separates columns within a row — use tab, not newline.
+    // \row separates rows (handled above with pushNewline).
+    // This preserves the tab-separated column structure for normalizeCellLines.
+    if (ctx.skipDepth === 0) ctx.out += "\t";
     return;
   }
 
