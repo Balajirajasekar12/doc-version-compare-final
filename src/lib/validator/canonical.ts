@@ -157,11 +157,13 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
     }
 
     // Space-separated with 2+ spaces: "Field  Value"
-    const spaceGapMatch = /^([A-Za-z][A-Za-z ]{0,30}?)\s{2,}(.+)$/.exec(s);
+    // Field can contain letters, spaces, &, /, -, (, ) for business content
+    // like "Paid Claims & Expenses", "Other Fees & Charges", "03/26 Total"
+    const spaceGapMatch = /^([A-Za-z][A-Za-z0-9 &,/\-().]{0,30}?)\s{2,}(.+)$/.exec(s);
     if (spaceGapMatch) {
       const field = spaceGapMatch[1].trim();
       const value = spaceGapMatch[2].trim();
-      if (field.length > 0 && field.length <= 30 && /^[A-Za-z]/.test(field) && !/[0-9]/.test(field)) {
+      if (field.length > 0 && field.length <= 40 && /^[A-Za-z]/.test(field) && !/^\d+$/.test(field)) {
         const isHeader = field.length <= 5 && value.length <= 5 &&
           /^[A-Za-z][A-Za-z ]*$/.test(field) && /^[A-Za-z][A-Za-z ]*$/.test(value);
         if (!isHeader) return { field, value };
@@ -171,14 +173,14 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
     // Single-space separated: "Field Value" where value is numeric
     // Catches PDF table rows like "Account 1000" or "Customer Since 2021-06-15"
     // where the parser didn't insert pipes and the gap is only one space.
-    const singleSpaceMatch = /^([A-Za-z][A-Za-z ]{0,30}?)\s(.+)$/.exec(s);
+    const singleSpaceMatch = /^([A-Za-z][A-Za-z0-9 &,/\-().]{0,30}?)\s(.+)$/.exec(s);
     if (singleSpaceMatch) {
       const field = singleSpaceMatch[1].trim();
       const value = singleSpaceMatch[2].trim();
       // Only match when the value is purely numeric (digits, commas, dots, hyphens, colons)
       // This prevents leaking parser artifacts like "onttbl 0 Arial;"
-      if (field.length > 0 && field.length <= 30 && field.length >= 3 &&
-        /^[A-Za-z]/.test(field) && !/[0-9]/.test(field) &&
+      if (field.length > 0 && field.length <= 40 && field.length >= 3 &&
+        /^[A-Za-z]/.test(field) && !/^\d+$/.test(field) &&
         /^[0-9][0-9,.:\-/]*$/.test(value)) {
         return { field, value };
       }
@@ -361,11 +363,11 @@ function normalizeCellLines(inputLines: string[]): string[] {
     const eqM = /^([A-Za-z][A-Za-z0-9 _/().\-&'*]+?)\s*=\s*(.+)$/.exec(line);
     if (eqM) return { field: eqM[1].trim(), value: eqM[2].trim() };
     // Space-separated: "Field    Value" (2+ spaces)
-    const spM = /^([A-Za-z][A-Za-z ]{0,30}?)\s{2,}(.+)$/.exec(line);
+    const spM = /^([A-Za-z][A-Za-z0-9 &,/\-().]{0,30}?)\s{2,}(.+)$/.exec(line);
     if (spM) {
       const f = spM[1].trim();
       const v = spM[2].trim();
-      if (f.length > 0 && f.length <= 30 && /^[A-Za-z]/.test(f) && !/[0-9]/.test(f)) {
+      if (f.length > 0 && f.length <= 40 && /^[A-Za-z]/.test(f) && !/^\d+$/.test(f)) {
         return { field: f, value: v };
       }
     }
@@ -1631,24 +1633,25 @@ export function compareCanonical(
     const MONTH_NAMES = ['january','february','march','april','may','june','july','august','september','october','november','december'];
     const keyParts = item.key.split(/\s+/);
     const isDateFragment = /^\d+(\s+\d+)+$/.test(item.key);
-    const isMonthName = keyParts.length === 1 && MONTH_NAMES.includes(item.key);
+    const isMonthName = keyParts.length === 1 && MONTH_NAMES.includes(item.key.toLowerCase());
     if (isDateFragment || isMonthName) {
       return false; // suppress date fragments and month names
     }
 
     // Rule 3: Suppress short PDF internal identifiers.
     // PDF parsers sometimes extract internal object references like
-    // "PG1" → "KEY_1" or "Obj" → "12 0 R" as field_value pairs.
+    // "PG1" → "KEY_1" or "KEY_1" → "PG1" as field_value pairs.
     // These are parser artifacts, not business content.
-    // Pattern: key is very short (≤5 chars) with digits/underscores,
-    // OR value is a short identifier-like string (KEY_N, Obj, etc.).
     const isPdfInternal = (
       item.key.length <= 5 && /\d/.test(item.key) && /^[A-Za-z0-9_]+$/.test(item.key) &&
       item.value.length <= 10 && /^[A-Za-z0-9_]+$/.test(item.value)
     ) ||
+      /^KEY[_\s]?\d+$/i.test(item.key) ||
       /^KEY[_\s]?\d+$/i.test(item.value) ||
       /^PG[_\s]?\d+$/i.test(item.key) ||
-      /^OBJ[_\s]?\d+/i.test(item.key);
+      /^PG[_\s]?\d+$/i.test(item.value) ||
+      /^OBJ[_\s]?\d+/i.test(item.key) ||
+      /^OBJ[_\s]?\d+/i.test(item.value);
     if (isPdfInternal) {
       return false; // suppress PDF internal artifacts
     }
@@ -1668,6 +1671,26 @@ export function compareCanonical(
   });
   const addedInComparing = allUnmatchedComparing.filter(item => {
     if (item.kind !== "field_value" && item.kind !== "heading") return false;
+
+    // Apply same suppression rules as missingInComparing
+    const MONTH_NAMES2 = ['january','february','march','april','may','june','july','august','september','october','november','december'];
+    const keyParts2 = item.key.split(/\s+/);
+    const isDateFragment2 = /^\d+(\s+\d+)+$/.test(item.key);
+    const isMonthName2 = keyParts2.length === 1 && MONTH_NAMES2.includes(item.key.toLowerCase());
+    if (isDateFragment2 || isMonthName2) return false;
+
+    const isPdfInternal2 = (
+      item.key.length <= 5 && /\d/.test(item.key) && /^[A-Za-z0-9_]+$/.test(item.key) &&
+      item.value.length <= 10 && /^[A-Za-z0-9_]+$/.test(item.value)
+    ) ||
+      /^KEY[_\s]?\d+$/i.test(item.key) ||
+      /^KEY[_\s]?\d+$/i.test(item.value) ||
+      /^PG[_\s]?\d+$/i.test(item.key) ||
+      /^PG[_\s]?\d+$/i.test(item.value) ||
+      /^OBJ[_\s]?\d+/i.test(item.key) ||
+      /^OBJ[_\s]?\d+/i.test(item.value);
+    if (isPdfInternal2) return false;
+
     return !consume(baselineValueCounts, item.value);
   });
 
