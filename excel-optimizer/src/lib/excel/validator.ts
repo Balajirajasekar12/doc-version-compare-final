@@ -9,7 +9,7 @@
  */
 import { SheetSnapshot, WorkbookSnapshot } from "./analyzer";
 import { Zip, readEntryText } from "./zip";
-import { toTitleCase } from "./casing";
+import { toTitleCase, correctTypos } from "./casing";
 import { SheetInfo } from "./types";
 import {
   WORKSHEET_CHILD_ORDER,
@@ -364,7 +364,8 @@ export function validateOutput(before: WorkbookSnapshot, after: WorkbookSnapshot
         diffs.push(`Value lost at "${b.name}"!${ref}`);
       } else if (
         !valuesEqual(escapeIllegalXmlChars(val), av) &&
-        !isTitleCaseChange(escapeIllegalXmlChars(val), av)
+        !isTitleCaseChange(escapeIllegalXmlChars(val), av) &&
+        !isTypoCorrectionChange(escapeIllegalXmlChars(val), av)
       ) {
         diffs.push(`Value changed at "${b.name}"!${ref}`);
       }
@@ -405,6 +406,16 @@ function isTitleCaseChange(before: string, after: string): boolean {
   const b = before.slice(2);
   const a = after.slice(2);
   return b !== a && toTitleCase(b) === a;
+}
+
+/** True when `after` equals correctTypos(before) then title-cased. */
+function isTypoCorrectionChange(before: string, after: string): boolean {
+  if (before.slice(0, 2) !== "s:" || after.slice(0, 2) !== "s:") return false;
+  const b = before.slice(2);
+  const a = after.slice(2);
+  if (b === a) return false;
+  const corrected = correctTypos(b);
+  return toTitleCase(corrected) === a;
 }
 
 /** Counts formulas/values/merges across a snapshot (for the report). */
