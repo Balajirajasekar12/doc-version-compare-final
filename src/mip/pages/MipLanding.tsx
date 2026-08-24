@@ -36,7 +36,7 @@ function CreateProjectDialog({ onClose }: { onClose: () => void }) {
     try {
       const project = await createProject(name.trim(), desc.trim());
       await selectProject(project.id);
-      navigate("/mip/projects");
+      navigate("/projects");
       onClose();
     } finally {
       setLoading(false);
@@ -102,7 +102,7 @@ function ProjectCard({ project }: { project: import("../types").MipProject }) {
 
   const handleOpen = async () => {
     await selectProject(project.id);
-    navigate("/mip/upload");
+    navigate("/upload");
   };
 
   const handleDelete = async () => {
