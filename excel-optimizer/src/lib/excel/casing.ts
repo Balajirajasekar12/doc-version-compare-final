@@ -42,18 +42,48 @@ export function needsTitleCase(text: string): boolean {
 // ============================================================
 
 const TYPO_CORRECTIONS: Array<{ pattern: RegExp; replacement: string }> = [
-  // HIGHMARK-specific: "Claim S B Ased Adminive" → "Claims Based Administrative"
+  // =====================================================================
+  // Phase 1: Multi-word patterns (greedy — match longest first)
+  // =====================================================================
+  // HIGHMARK: full phrase corrections
   { pattern: /\bClaim\s+S\s+B\s+Ased\s+Adminive\b/gi, replacement: "Claims Based Administrative" },
+  { pattern: /\bClaims?\s+S\s+B\s+Ased\s+Adminive\b/gi, replacement: "Claims Based Administrative" },
   { pattern: /\bClaims?\s+S\s+B\s+Ased\b/gi, replacement: "Claims Based" },
+
+  // =====================================================================
+  // Phase 2: Single-word garbled patterns (applied before camelCase splitting)
+  // These catch OCR/transcription errors where a single word is garbled.
+  // The key insight: correctTypos runs BEFORE toTitleCase, so garbled
+  // single words like "claimS" or "bAsed" must be fixed first.
+  // =====================================================================
+  // "claimS" → "Claims" (OCR garbled trailing S)
+  { pattern: /\bclaimS\b/g, replacement: "Claims" },
+  // "bAsed" → "Based" (OCR garbled capital A)
+  { pattern: /\bbAsed\b/g, replacement: "Based" },
+  // "SbAsed" → "SbBased" (unlikely but safe)
+  { pattern: /\bSbAsed\b/g, replacement: "SbBased" },
+  // "Ased" → "Based" when it's a standalone garbled word
+  { pattern: /\bAsed\b/g, replacement: "Based" },
+  // "claimS bAsed" as a two-word pattern
+  { pattern: /\bclaimS\s+bAsed\b/g, replacement: "Claims Based" },
+  // "Claims bAsed" (partial garble)
+  { pattern: /\bClaims?\s+bAsed\b/gi, replacement: "Claims Based" },
+  // "claimS Based" or "Claims Based"
+  { pattern: /\bclaimS\s+Based\b/g, replacement: "Claims Based" },
+  // Generic "Adminive" (OCR garbled)
   { pattern: /\bAdminive\b/gi, replacement: "Administrative" },
-  // "B lllpackage" → "Bill Package" (extra L + missing L + space)
-  { pattern: /\bB\s+lllpackage\b/gi, replacement: "Bill Package" },
-  { pattern: /\blllpackage\b/gi, replacement: "Bill Package" },
-  // "llpackage" → "Bill Package" (missing B)
-  { pattern: /\bllpackage\b/gi, replacement: "Bill Package" },
-  // Generic: multiple consecutive same letters (OCR/transcription errors)
-  // e.g., "lll" → "ll" but only in known patterns to avoid false positives
-  // "Sfb" → "SFB" (handled by ACRONYMS in titleCaseSingle)
+  // "Adiminstrative", "Adminstrative" etc.
+  { pattern: /\bAdmin(?:i?n?istrat(?:iv)?e?)\b/gi, replacement: "Administrative" },
+
+  // =====================================================================
+  // Phase 3: "Bill Package" corrections
+  // =====================================================================
+  // "B lllpackage" → "Bill Package" (space + extra Ls)
+  { pattern: /\bB\s+ll+package\b/gi, replacement: "Bill Package" },
+  // "lllpackage" → "Bill Package" (missing B, extra Ls)
+  { pattern: /\bll+package\b/gi, replacement: "Bill Package" },
+  // "billpackage" → "Bill Package" (no space)
+  { pattern: /\bbill\s*package\b/gi, replacement: "Bill Package" },
 ];
 
 /**

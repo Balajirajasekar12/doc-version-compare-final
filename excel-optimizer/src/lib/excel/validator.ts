@@ -416,14 +416,6 @@ function isTypoCorrectionChange(before: string, after: string): boolean {
   if (b === a) return false;
   const corrected = correctTypos(b);
   const result = toTitleCase(corrected);
-  // Debug: log when a correction is attempted
-  if (corrected !== b) {
-    console.log("[EO-TYPO] before:", JSON.stringify(b));
-    console.log("[EO-TYPO] corrected:", JSON.stringify(corrected));
-    console.log("[EO-TYPO] result:", JSON.stringify(result));
-    console.log("[EO-TYPO] after:", JSON.stringify(a));
-    console.log("[EO-TYPO] match:", result === a);
-  }
   return result === a;
 }
 

@@ -321,9 +321,6 @@ function applyTitleCase(sheet: ParsedSheet, cell: CellData, settings: OptimizerS
   // Apply typo/spelling corrections first, then title case
   const corrected = settings.correctTypos ? correctTypos(text) : text;
   const cased = toTitleCase(corrected);
-  if (corrected !== text) {
-    console.log("[EO-FORMAT] correcting:", JSON.stringify(text), "->", JSON.stringify(corrected), "->", JSON.stringify(cased));
-  }
   if (cased === text) return false;
   if (setCellText(sheet, cell.row, cell.col, cased)) {
     sheet.casedRefs.add(cell.ref);
