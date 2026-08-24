@@ -7,7 +7,7 @@
  */
 import { LoadedWorkbook, WorkbookSnapshot, extractSnapshot, loadWorkbook } from "./analyzer";
 import { emptyCounters, formatSheet } from "./format";
-import { fixDrawingOverlaps } from "./drawings";
+import { fixDrawingOverlaps, type ImageOptimizationStats } from "./drawings";
 import { syncTableColumnNames } from "./tables";
 import { loadZip, saveZip, Zip, readEntryText, listEntries } from "./zip";
 import { serializeSheet } from "./worksheet";
@@ -186,6 +186,17 @@ export async function runOptimization(
 
   // Write modified parts back into the zip.
   let imagesReSpaced = 0;
+  const totalImageStats: ImageOptimizationStats = {
+    imagesBefore: 0,
+    imagesAfter: 0,
+    overlapsBefore: 0,
+    overlapsAfter: 0,
+    contentConflictsBefore: 0,
+    contentConflictsAfter: 0,
+    imagesRepositioned: 0,
+    imagesResized: 0,
+    imagesGrouped: 0,
+  };
   await stage("generating", "Generating optimized workbook…", 92, onProgress, async () => {
     loaded.zip.file("xl/styles.xml", loaded.styleLib.serialize());
     for (const name of touchedSheets) {
@@ -199,11 +210,21 @@ export async function runOptimization(
     for (const info of loaded.wb.sheets) {
       const ps = loaded.parsed.get(info.name);
       if (!ps) continue;
-      const moved = await fixDrawingOverlaps(loaded.zip, ps, info.file);
+      const stats = await fixDrawingOverlaps(loaded.zip, ps, info.file);
       if (ps.hasDrawing) {
-        debugLog.log('DRAWING', `${info.name}: hasDrawing=true, moved=${moved}`);
+        debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
-      imagesReSpaced += moved;
+      imagesReSpaced += stats.imagesRepositioned;
+      // Aggregate stats across all sheets.
+      totalImageStats.imagesBefore += stats.imagesBefore;
+      totalImageStats.imagesAfter += stats.imagesAfter;
+      totalImageStats.overlapsBefore += stats.overlapsBefore;
+      totalImageStats.overlapsAfter += stats.overlapsAfter;
+      totalImageStats.contentConflictsBefore += stats.contentConflictsBefore;
+      totalImageStats.contentConflictsAfter += stats.contentConflictsAfter;
+      totalImageStats.imagesRepositioned += stats.imagesRepositioned;
+      totalImageStats.imagesResized += stats.imagesResized;
+      totalImageStats.imagesGrouped += stats.imagesGrouped;
       if (ps.casedRefs.size > 0) {
         await syncTableColumnNames(loaded.zip, ps, info.file, ps.casedRefs);
       }
@@ -291,6 +312,12 @@ export async function runOptimization(
     headingsFormatted: counters.headingsFormatted,
     headingsTitleCased: counters.headingsTitleCased,
     imagesReSpaced,
+    imageOverlapsBefore: totalImageStats.overlapsBefore,
+    imageOverlapsAfter: totalImageStats.overlapsAfter,
+    imageContentConflictsBefore: totalImageStats.contentConflictsBefore,
+    imageContentConflictsAfter: totalImageStats.contentConflictsAfter,
+    imagesRepositioned: totalImageStats.imagesRepositioned,
+    imagesGrouped: totalImageStats.imagesGrouped,
     tablesOptimized: counters.tablesOptimized,
     totalRowsFormatted: counters.totalRowsFormatted,
     subtotalRowsFormatted: counters.subtotalRowsFormatted,

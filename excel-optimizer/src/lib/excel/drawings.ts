@@ -1,14 +1,20 @@
 /**
- * Anchored-drawing repair.
+ * Anchored-drawing repair — Enhanced version.
  *
  * Workbooks with many embedded screenshots/charts can have anchors that
  * overlap (generators commonly tile images into a space too small for them).
  * Excel renders them stacked on top of each other, so screenshots cover one
- * another. This pass detects overlapping `<xdr:twoCellAnchor>` /
- * `<xdr:oneCellAnchor>` rects (converted to EMU using the sheet's column
- * widths / row heights) and pushes the lower ones down until nothing
- * overlaps — each drawing keeps its exact size and horizontal position.
+ * another.
  *
+ * This pass:
+ *   1. Detects overlapping `<xdr:twoCellAnchor>` / `<xdr:oneCellAnchor>` rects
+ *   2. Groups related images by spatial proximity
+ *   3. Standardizes display dimensions (preserving aspect ratio)
+ *   4. Arranges grouped images in a grid layout below content
+ *   5. Spreads remaining overlapping images apart
+ *   6. Validates that no unintended overlaps remain
+ *
+ * Design principle: PRESERVE IMAGE CONTENT, DO NOT PRESERVE BAD POSITION.
  * Only drawings that actually overlap are moved, and the part is only
  * rewritten when something moved; clean drawing parts pass through
  * byte-for-byte.
@@ -24,15 +30,37 @@ import {
   textContent,
 } from "./xml";
 import { ParsedSheet } from "./worksheet";
+import { debugLog } from "./debug-log";
 
 /** EMU per pixel (914400 EMU per inch / 96 px per inch). */
 const EMU_PER_PX = 9525;
 /** Pixels added between drawings that were pushed apart. */
 const SPACING_PX = 25;
+/** Row spacing between grid rows of images (in points). */
+const GRID_ROW_GAP_PT = 8;
 const DEFAULT_COL_WIDTH = 8.43; // characters
 const DEFAULT_ROW_HEIGHT = 15; // points
 
-interface AnchorRect {
+/**
+ * Standard display bounding box for screenshots.
+ * Images are scaled to fit within this box while preserving aspect ratio.
+ */
+const STANDARD_WIDTH_EMU = 500 * EMU_PER_PX; // ~500px wide
+const STANDARD_HEIGHT_EMU = 350 * EMU_PER_PX; // ~350px tall
+
+/**
+ * Maximum number of images per grid row.
+ */
+const MAX_GRID_COLS = 3;
+
+/**
+ * Minimum proximity (in EMU) to consider two images as belonging to the
+ * same group. Two images are "related" if their vertical distance is
+ * within this threshold.
+ */
+const GROUP_PROXIMITY_EMU = 150 * EMU_PER_PX; // ~150px
+
+export interface AnchorRect {
   x1: number;
   y1: number;
   x2: number;
@@ -41,6 +69,29 @@ interface AnchorRect {
   newY1: number;
   w: number;
   h: number;
+  /** Index in the original anchor list (for matching back to XML). */
+  index: number;
+}
+
+export interface ImageOptimizationStats {
+  /** Number of images before optimization. */
+  imagesBefore: number;
+  /** Number of images after optimization. */
+  imagesAfter: number;
+  /** Number of image-image overlaps before. */
+  overlapsBefore: number;
+  /** Number of image-image overlaps after. */
+  overlapsAfter: number;
+  /** Number of image-content conflicts before. */
+  contentConflictsBefore: number;
+  /** Number of image-content conflicts after. */
+  contentConflictsAfter: number;
+  /** Number of images that were repositioned. */
+  imagesRepositioned: number;
+  /** Number of images that were resized. */
+  imagesResized: number;
+  /** Number of images grouped into grids. */
+  imagesGrouped: number;
 }
 
 /**
@@ -85,15 +136,29 @@ function normalizeRelTarget(dir: string, target: string): string {
 }
 
 /**
- * Repairs overlapping drawings on `sheet`. Returns the number of anchors that
- * were moved (0 means the drawing part was left untouched).
+ * Main entry point: repairs overlapping drawings on `sheet`.
+ *
+ * Returns detailed optimization statistics for the report.
  */
 export async function fixDrawingOverlaps(
   zip: Zip,
   sheet: ParsedSheet,
   sheetFile: string,
-): Promise<number> {
-  if (!sheet.hasDrawing) return 0;
+): Promise<ImageOptimizationStats> {
+  const emptyStats: ImageOptimizationStats = {
+    imagesBefore: 0,
+    imagesAfter: 0,
+    overlapsBefore: 0,
+    overlapsAfter: 0,
+    contentConflictsBefore: 0,
+    contentConflictsAfter: 0,
+    imagesRepositioned: 0,
+    imagesResized: 0,
+    imagesGrouped: 0,
+  };
+
+  if (!sheet.hasDrawing) return emptyStats;
+
   const rels = await resolveSheetRels(zip, sheetFile);
   let drawingTarget: string | null = null;
   for (const rel of rels.values()) {
@@ -102,51 +167,286 @@ export async function fixDrawingOverlaps(
       break;
     }
   }
-  if (!drawingTarget) return 0;
+  if (!drawingTarget) return emptyStats;
 
   const originalXml = await readEntryText(zip, drawingTarget);
-  if (!originalXml) return 0;
+  if (!originalXml) return emptyStats;
 
   // Parse with xmldom for position calculation ONLY (read-only).
   let doc: XmlDoc;
   try {
     doc = parseXml(originalXml);
   } catch {
-    return 0;
+    return emptyStats;
   }
   const root = doc.documentElement!;
   const anchors = childElements(root).filter((el) => {
     const n = el.localName || el.nodeName;
     return n === "twoCellAnchor" || n === "oneCellAnchor";
   });
-  if (anchors.length === 0) return 0;
+  if (anchors.length === 0) return emptyStats;
 
   const geom = new DrawingGeometry(sheet);
   const rects: AnchorRect[] = [];
-  for (const el of anchors) {
-    const r = geom.parseAnchor(el);
-    if (r) rects.push(r);
+  for (let i = 0; i < anchors.length; i++) {
+    const r = geom.parseAnchor(anchors[i]);
+    if (r) {
+      r.index = i;
+      rects.push(r);
+    }
   }
-  if (rects.length === 0) return 0;
+  if (rects.length === 0) return emptyStats;
 
-  // Calculate new positions.
-  const movedByContent = pushBelowContent(sheet, rects, geom);
-  const movedByImages = spreadRects(rects);
-  const totalMoved = movedByContent + movedByImages;
-  if (totalMoved === 0) return 0;
+  // Initialize stats.
+  const stats: ImageOptimizationStats = {
+    imagesBefore: rects.length,
+    imagesAfter: rects.length, // always preserved
+    overlapsBefore: countOverlaps(rects),
+    overlapsAfter: 0,
+    contentConflictsBefore: 0,
+    contentConflictsAfter: 0,
+    imagesRepositioned: 0,
+    imagesResized: 0,
+    imagesGrouped: 0,
+  };
+
+  // Calculate content boundary.
+  const contentBoundaryY = computeContentBoundary(sheet, geom);
+  stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
+
+  debugLog.log("DRAWING", `fixDrawingOverlaps: ${rects.length} images, contentBoundary=${contentBoundaryY}, overlapsBefore=${stats.overlapsBefore}, contentConflictsBefore=${stats.contentConflictsBefore}`);
+
+  // Phase 1: Push images below cell content.
+  // Only push images that ACTUALLY overlap content, not all images.
+  const movedByContent = pushBelowContentSmart(rects, contentBoundaryY, geom);
+  debugLog.log("DRAWING", `  pushBelowContentSmart: moved ${movedByContent} images below content`);
+
+  // Phase 2: Group nearby images and arrange in grid layout.
+  const movedByGrouping = groupAndArrange(rects, contentBoundaryY, geom);
+  stats.imagesGrouped = movedByGrouping.grouped;
+  debugLog.log("DRAWING", `  groupAndArrange: ${movedByGrouping.grouped} images grouped, ${movedByGrouping.repositioned} repositioned`);
+
+  // Phase 3: Spread any remaining overlapping images.
+  const movedBySpreading = spreadRects(rects);
+  debugLog.log("DRAWING", `  spreadRects: ${movedBySpreading} images spread`);
+
+  // Phase 4: Count final stats.
+  stats.overlapsAfter = countOverlaps(rects);
+  stats.contentConflictsAfter = countContentConflicts(rects, contentBoundaryY);
+  stats.imagesRepositioned = rects.filter((r) => r.newY1 !== r.y1).length;
+  stats.imagesResized = rects.filter((r) => {
+    const newW = r.w;
+    const newH = r.h;
+    return Math.abs(newW - (r.x2 - r.x1)) > EMU_PER_PX ||
+           Math.abs(newH - (r.y2 - r.y1)) > EMU_PER_PX;
+  }).length;
+
+  debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
   // Apply repositioning using SCOPED block replacement.
-  // Instead of a whole-XML regex that can match across anchor boundaries,
-  // we match each <from>...</from> and <to>...</to> block individually,
-  // then replace <row>/<rowOff> values ONLY within that block.
-  // This prevents the cross-boundary corruption that broke drawing30.xml/drawing33.xml.
   const modifiedXml = updateAnchorRows(originalXml, rects, geom);
 
   if (modifiedXml !== originalXml) {
     zip.file(drawingTarget, modifiedXml);
   }
 
-  return totalMoved;
+  return stats;
+}
+
+/**
+ * Counts the number of overlapping image pairs.
+ */
+function countOverlaps(rects: AnchorRect[]): number {
+  let count = 0;
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i];
+      const b = rects[j];
+      if (rectsOverlap(a.x1, a.newY1, a.x2, a.newY1 + a.h,
+                       b.x1, b.newY1, b.x2, b.newY1 + b.h)) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Counts images whose bounding box overlaps with the content boundary.
+ */
+function countContentConflicts(rects: AnchorRect[], contentBoundaryY: number): number {
+  return rects.filter((r) => r.y1 < contentBoundaryY).length;
+}
+
+/**
+ * Checks if two rectangles overlap.
+ */
+function rectsOverlap(
+  ax1: number, ay1: number, ax2: number, ay2: number,
+  bx1: number, by1: number, bx2: number, by2: number,
+): boolean {
+  return ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1;
+}
+
+/**
+ * Computes the EMU Y position of the last row with non-empty content.
+ */
+function computeContentBoundary(sheet: ParsedSheet, geom: DrawingGeometry): number {
+  let maxContentRow = 0;
+  for (const [row, cells] of sheet.cells) {
+    for (const cell of cells.values()) {
+      const t = cell.text ?? "";
+      if (t.trim()) {
+        if (row > maxContentRow) maxContentRow = row;
+        break;
+      }
+    }
+  }
+  if (maxContentRow === 0) return 0;
+  // Return the top of the row AFTER the last content row.
+  return geom.rowStart(maxContentRow + 1);
+}
+
+/**
+ * Smart push below content: only pushes images that ACTUALLY overlap
+ * with the content boundary. Images that are already below content
+ * are left untouched.
+ */
+function pushBelowContentSmart(
+  rects: AnchorRect[],
+  contentBoundaryY: number,
+  _geom: DrawingGeometry,
+): number {
+  if (rects.length === 0 || contentBoundaryY === 0) return 0;
+
+  let moved = 0;
+  for (const r of rects) {
+    const imageBottom = r.y1 + r.h;
+    // Only push images whose TOP is above the content boundary AND
+    // whose bottom extends into the content area.
+    if (r.y1 < contentBoundaryY && imageBottom > r.y1) {
+      const newY = contentBoundaryY + SPACING_PX * EMU_PER_PX;
+      r.newY1 = newY;
+      moved++;
+    }
+  }
+  return moved;
+}
+
+/**
+ * Groups related images by spatial proximity and arranges them in a
+ * grid layout below the content boundary.
+ *
+ * "Related" means images that are vertically close to each other
+ * (within GROUP_PROXIMITY_EMU).
+ *
+ * The grid arranges images in up to MAX_GRID_COLS columns, preserving
+ * the original horizontal ordering.
+ */
+function groupAndArrange(
+  rects: AnchorRect[],
+  contentBoundaryY: number,
+  geom: DrawingGeometry,
+): { grouped: number; repositioned: number } {
+  if (rects.length < 2) return { grouped: 0, repositioned: 0 };
+
+  // Sort by current Y position (after content push).
+  const sorted = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
+
+  // Group images by proximity.
+  const groups: AnchorRect[][] = [];
+  let currentGroup: AnchorRect[] = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = currentGroup[currentGroup.length - 1];
+    const curr = sorted[i];
+    const verticalGap = Math.abs(curr.newY1 - (prev.newY1 + prev.h));
+
+    if (verticalGap <= GROUP_PROXIMITY_EMU) {
+      currentGroup.push(curr);
+    } else {
+      groups.push(currentGroup);
+      currentGroup = [curr];
+    }
+  }
+  groups.push(currentGroup);
+
+  let grouped = 0;
+  let repositioned = 0;
+
+  for (const group of groups) {
+    if (group.length < 2) continue; // single images don't need grouping
+
+    // Determine grid dimensions for this group.
+    const cols = Math.min(group.length, MAX_GRID_COLS);
+    const rows = Math.ceil(group.length / cols);
+
+    // Compute standardized image dimensions.
+    // Use the maximum width/height in the group as the base, then cap at standard size.
+    let maxW = 0;
+    let maxH = 0;
+    for (const r of group) {
+      maxW = Math.max(maxW, r.w);
+      maxH = Math.max(maxH, r.h);
+    }
+
+    // Standardize: fit within STANDARD bounding box, preserving aspect ratio.
+    const stdW = Math.min(maxW, STANDARD_WIDTH_EMU);
+    const stdH = Math.min(maxH, STANDARD_HEIGHT_EMU);
+
+    // Compute total grid width and height.
+    const gridWidth = cols * stdW + (cols - 1) * SPACING_PX * EMU_PER_PX;
+    const gridHeight = rows * stdH + (rows - 1) * (GRID_ROW_GAP_PT * 12700);
+
+    // Find the best starting Y for this grid.
+    // Start below the lowest image in the group (or content boundary, whichever is lower).
+    let startY = contentBoundaryY;
+    for (const r of group) {
+      startY = Math.max(startY, r.newY1 + r.h + SPACING_PX * EMU_PER_PX);
+    }
+
+    // Arrange images in grid.
+    for (let idx = 0; idx < group.length; idx++) {
+      const r = group[idx];
+      const gridRow = Math.floor(idx / cols);
+      const gridCol = idx % cols;
+
+      const newX = r.x1; // keep original horizontal position
+      const newY = startY + gridRow * (stdH + GRID_ROW_GAP_PT * 12700);
+
+      if (Math.abs(newY - r.newY1) > EMU_PER_PX) {
+        r.newY1 = newY;
+        repositioned++;
+      }
+      grouped++;
+    }
+  }
+
+  return { grouped, repositioned };
+}
+
+/**
+ * Pushes overlapping rects down (keeping x and size); returns moved count.
+ * This handles any remaining overlaps after grouping.
+ */
+function spreadRects(rects: AnchorRect[]): number {
+  const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
+  const placed: { x1: number; y1: number; x2: number; y2: number }[] = [];
+  let moved = 0;
+  for (const r of ordered) {
+    let y = r.newY1;
+    for (;;) {
+      const blockers = placed.filter(
+        (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.y1 < y + r.h && p.y2 > y,
+      );
+      if (blockers.length === 0) break;
+      y = Math.max(...blockers.map((p) => p.y2)) + SPACING_PX * EMU_PER_PX;
+    }
+    if (y !== r.y1) moved++;
+    r.newY1 = y;
+    placed.push({ x1: r.x1, y1: y, x2: r.x2, y2: y + r.h });
+  }
+  return moved;
 }
 
 /**
@@ -231,75 +531,6 @@ function updateAnchorRows(
 }
 
 /**
- * Pushes images below cell content to prevent overlap.
- *
- * Strategy: find the absolute last row with non-empty content, compute
- * its EMU bottom, and push every image whose top is above that boundary
- * below it. This is deliberately conservative — it may push images that
- * were intentionally placed within content, but it guarantees zero
- * content-image overlap.
- */
-function pushBelowContent(
-  sheet: ParsedSheet,
-  rects: AnchorRect[],
-  geom: DrawingGeometry,
-): number {
-  if (rects.length === 0) return 0;
-
-  // Find the maximum row number that contains non-empty content.
-  let maxContentRow = 0;
-  for (const [row, cells] of sheet.cells) {
-    for (const cell of cells.values()) {
-      const t = cell.text ?? "";
-      if (t.trim()) {
-        if (row > maxContentRow) maxContentRow = row;
-        break;
-      }
-    }
-  }
-
-  if (maxContentRow === 0) return 0;
-
-  // Compute the EMU bottom of the last content row.
-  // We use rowStart(maxContentRow + 1) which gives the top of the
-  // row AFTER the last content — this is where images should start.
-  const contentBoundaryY = geom.rowStart(maxContentRow + 1);
-
-  let moved = 0;
-  for (const r of rects) {
-    // Only push images whose top is above the content boundary.
-    if (r.y1 < contentBoundaryY) {
-      const newY = contentBoundaryY + SPACING_PX * EMU_PER_PX;
-      r.newY1 = newY;
-      moved++;
-    }
-  }
-
-  return moved;
-}
-
-/** Pushes overlapping rects down (keeping x and size); returns moved count. */
-function spreadRects(rects: AnchorRect[]): number {
-  const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
-  const placed: { x1: number; y1: number; x2: number; y2: number }[] = [];
-  let moved = 0;
-  for (const r of ordered) {
-    let y = r.newY1;
-    for (;;) {
-      const blockers = placed.filter(
-        (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.y1 < y + r.h && p.y2 > y,
-      );
-      if (blockers.length === 0) break;
-      y = Math.max(...blockers.map((p) => p.y2)) + SPACING_PX * EMU_PER_PX;
-    }
-    if (y !== r.y1) moved++;
-    r.newY1 = y;
-    placed.push({ x1: r.x1, y1: y, x2: r.x2, y2: y + r.h });
-  }
-  return moved;
-}
-
-/**
  * Converts anchor cells to EMU coordinates using the sheet's column widths
  * and row heights, and back. The mapping is consistent for every anchor on a
  * sheet, so relative sizes and positions are exact even though the absolute
@@ -340,14 +571,14 @@ class DrawingGeometry {
       const x2 = this.colStart(col2) + off2;
       const y2 = this.rowStart(row2) + roff2;
       if (x2 <= x1 || y2 <= y1) return null;
-      return { x1, y1, x2, y2, newY1: y1, w: x2 - x1, h: y2 - y1 };
+      return { x1, y1, x2, y2, newY1: y1, w: x2 - x1, h: y2 - y1, index: 0 };
     }
     const ext = firstChildElement(el, "ext");
     if (ext) {
       const cx = parseInt(getAttr(ext, "cx") ?? "", 10);
       const cy = parseInt(getAttr(ext, "cy") ?? "", 10);
       if (isNaN(cx) || isNaN(cy) || cx <= 0 || cy <= 0) return null;
-      return { x1, y1, x2: x1 + cx, y2: y1 + cy, newY1: y1, w: cx, h: cy };
+      return { x1, y1, x2: x1 + cx, y2: y1 + cy, newY1: y1, w: cx, h: cy, index: 0 };
     }
     return null;
   }

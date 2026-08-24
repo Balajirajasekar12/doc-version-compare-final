@@ -218,6 +218,18 @@ export interface OptimizationReport {
   headingsTitleCased: number;
   /** Anchored drawings that were spread apart to remove overlaps. */
   imagesReSpaced: number;
+  /** Number of image-image overlaps detected before optimization. */
+  imageOverlapsBefore: number;
+  /** Number of image-image overlaps remaining after optimization. */
+  imageOverlapsAfter: number;
+  /** Number of image-content conflicts detected before optimization. */
+  imageContentConflictsBefore: number;
+  /** Number of image-content conflicts remaining after optimization. */
+  imageContentConflictsAfter: number;
+  /** Number of images that were repositioned. */
+  imagesRepositioned: number;
+  /** Number of images grouped into logical grids. */
+  imagesGrouped: number;
   worksheetsPreserved: number;
   macrosPreserved: boolean;
   warnings: string[];

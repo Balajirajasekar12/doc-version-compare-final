@@ -64,7 +64,10 @@ export function ReportView({ report, blob, downloadName, originalBlob, originalN
       `Sheets: ${report.sheetsTotal} (${report.sheetsProcessed} optimized, ${report.sheetsSkippedEmpty} empty)`,
       `Cells standardized: ${formatNumber(report.cellsStandardized)}`,
       `Headings title-cased: ${formatNumber(report.headingsTitleCased)}`,
-      `Screenshots re-spaced: ${formatNumber(report.imagesReSpaced)}`,
+      `Screenshots repositioned: ${formatNumber(report.imagesReSpaced)}`,
+      `Image overlaps: ${report.imageOverlapsBefore} → ${report.imageOverlapsAfter}`,
+      `Content/image conflicts: ${report.imageContentConflictsBefore} → ${report.imageContentConflictsAfter}`,
+      `Images grouped: ${formatNumber(report.imagesGrouped)}`,
       `Formulas: ${report.formulasBefore} → ${report.formulasAfter}`,
       `Charts: ${report.chartsAfter} · Pivots: ${report.pivotTablesAfter} · Images: ${report.imagesAfter} · Merges: ${report.mergedRangesAfter}`,
       `Macros preserved: ${report.macrosPreserved}`,
@@ -119,7 +122,16 @@ export function ReportView({ report, blob, downloadName, originalBlob, originalN
               <Bullet icon={Type} label="Headings title-cased" value={formatNumber(report.headingsTitleCased)} />
             )}
             {report.imagesReSpaced > 0 && (
-              <Bullet icon={Images} label="Screenshots re-spaced" value={formatNumber(report.imagesReSpaced)} />
+              <Bullet icon={Images} label="Screenshots repositioned" value={formatNumber(report.imagesReSpaced)} />
+            )}
+            {report.imageOverlapsBefore > 0 && (
+              <Bullet icon={Images} label="Image overlaps fixed" value={`${formatNumber(report.imageOverlapsBefore - report.imageOverlapsAfter)} of ${formatNumber(report.imageOverlapsBefore)}`} />
+            )}
+            {report.imageContentConflictsBefore > 0 && (
+              <Bullet icon={Images} label="Content/image conflicts fixed" value={`${formatNumber(report.imageContentConflictsBefore - report.imageContentConflictsAfter)} of ${formatNumber(report.imageContentConflictsBefore)}`} />
+            )}
+            {report.imagesGrouped > 0 && (
+              <Bullet icon={Images} label="Images grouped" value={formatNumber(report.imagesGrouped)} />
             )}
             <Bullet icon={Grid3X3} label="Tables optimized" value={formatNumber(report.tablesOptimized)} />
             <Bullet icon={Sigma} label="Total / subtotal rows" value={`${formatNumber(report.totalRowsFormatted)} / ${formatNumber(report.subtotalRowsFormatted)}`} />
