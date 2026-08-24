@@ -120,7 +120,7 @@ export async function fixDrawingOverlaps(
     const n = el.localName || el.nodeName;
     return n === "twoCellAnchor" || n === "oneCellAnchor";
   });
-  if (anchors.length < 2) return 0;
+  if (anchors.length === 0) return 0;
 
   const geom = new DrawingGeometry(sheet);
   const rects: AnchorRect[] = [];
@@ -128,9 +128,17 @@ export async function fixDrawingOverlaps(
     const r = geom.parseAnchor(el);
     if (r) rects.push(r);
   }
-  if (rects.length < 2) return 0;
+  if (rects.length === 0) return 0;
 
-  const moved = spreadRects(rects);
+  // Phase 1: Push images below cell content they overlap with.
+  // This handles the common case where screenshots are anchored at
+  // rows that contain test data, causing the image to cover the data.
+  const movedByContent = pushBelowContent(sheet, rects, geom);
+
+  // Phase 2: Push images below other images they overlap with.
+  const movedByImages = spreadRects(rects);
+
+  const moved = movedByContent + movedByImages;
   if (moved === 0) return 0;
 
   for (const r of rects) {
@@ -138,6 +146,74 @@ export async function fixDrawingOverlaps(
     geom.writeAnchorY(r);
   }
   zip.file(drawingTarget, serializeXml(doc));
+  return moved;
+}
+
+/**
+ * Pushes images below the cell content they overlap.
+ *
+ * For each image, finds non-empty cells whose rows overlap with the
+ * image's anchor row range and whose columns overlap with the image's
+ * horizontal span. If any such cells exist, the image is pushed below
+ * the lowest overlapping content row.
+ */
+function pushBelowContent(
+  sheet: ParsedSheet,
+  rects: AnchorRect[],
+  geom: DrawingGeometry,
+): number {
+  if (rects.length === 0) return 0;
+
+  // Build a row → bottom-EMU map for rows that contain non-empty content.
+  const contentRowBottoms = new Map<number, number>();
+  for (const [row, cells] of sheet.cells) {
+    let hasContent = false;
+    for (const cell of cells.values()) {
+      const t = cell.text ?? "";
+      if (t.trim()) {
+        hasContent = true;
+        break;
+      }
+    }
+    if (hasContent) {
+      // Bottom of this row in EMU = start of this row + its height.
+      contentRowBottoms.set(row, geom.rowStart(row) + geom.rowEmu(row));
+    }
+  }
+
+  if (contentRowBottoms.size === 0) return 0;
+
+  let moved = 0;
+  for (const r of rects) {
+    // Determine the image's row range from its current y1 / y2.
+    const fromInfo = geom.yToRow(r.y1);
+    const toInfo = geom.yToRow(r.y2);
+    const imageStartRow = fromInfo.row;
+    const imageEndRow = toInfo.row + 1; // +1 because yToRow gives the row the offset falls in
+
+    // Find the lowest content bottom that overlaps with this image.
+    let maxContentBottom = 0;
+    for (const [row, bottom] of contentRowBottoms) {
+      if (row >= imageStartRow && row <= imageEndRow) {
+        maxContentBottom = Math.max(maxContentBottom, bottom);
+      }
+    }
+
+    // Also check rows slightly above — if an image starts mid-row,
+    // content in the row above might still be visually overlapping.
+    for (const [row, bottom] of contentRowBottoms) {
+      if (row === imageStartRow - 1) {
+        maxContentBottom = Math.max(maxContentBottom, bottom);
+      }
+    }
+
+    if (maxContentBottom > 0 && r.y1 < maxContentBottom) {
+      const newY = maxContentBottom + SPACING_PX * EMU_PER_PX;
+      r.newY1 = newY;
+      moved++;
+    }
+  }
+
   return moved;
 }
 
@@ -242,7 +318,7 @@ class DrawingGeometry {
   }
 
   /** EMU height of row `row` (0-based). */
-  private rowEmu(row: number): number {
+  public rowEmu(row: number): number {
     const rowEl = this.sheet.rowByNum.get(row + 1);
     let pt = this.defaultRowHeight;
     if (rowEl) {
@@ -258,14 +334,14 @@ class DrawingGeometry {
     return acc;
   }
 
-  private rowStart(row: number): number {
+  public rowStart(row: number): number {
     let acc = 0;
     for (let r = 0; r < row; r++) acc += this.rowEmu(r);
     return acc;
   }
 
   /** Converts an EMU y position back to (row, rowOff) with rowOff ≥ 0. */
-  private yToRow(y: number): { row: number; off: number } {
+  public yToRow(y: number): { row: number; off: number } {
     let acc = 0;
     for (let r = 0; r < 200_000; r++) {
       const h = this.rowEmu(r);
