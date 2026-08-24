@@ -473,8 +473,8 @@ function updateAnchorRows(
   // Match each <from>...</from> as a complete unit.
   let fromIdx = 0;
   result = result.replace(
-    /<(?:\w+:)?from\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?from>/g,
-    (fullMatch, _attrs: string, inner: string) => {
+    /<(\w+:)?from\b([^>]*)>([\s\S]*?)<\/(\w+:)?from>/g,
+    (fullMatch, _pfx1: string | undefined, _attrs: string, inner: string, _pfx2: string | undefined) => {
       if (fromIdx >= rects.length) return fullMatch;
       const r = rects[fromIdx];
       fromIdx++;
@@ -484,15 +484,16 @@ function updateAnchorRows(
       const newOff = Math.max(0, Math.round(off));
 
       // Replace <row> within this <from> block only.
+      // CRITICAL: preserve the namespace prefix (e.g. xdr:) — stripping it corrupts the XML.
       let updated = inner.replace(
-        /<(?:\w+:)?row>(\d+)<\/(?:\w+:)?row>/,
-        `<row>${row}</row>`,
+        /(<(\w+:)?row>)(\d+)(<\/(\w+:)?row>)/,
+        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${row}${close}`,
       );
 
       // Replace <rowOff> within this <from> block only.
       updated = updated.replace(
-        /<(?:\w+:)?rowOff>(\d+)<\/(?:\w+:)?rowOff>/,
-        `<rowOff>${newOff}</rowOff>`,
+        /(<(\w+:)?rowOff>)(\d+)(<\/(\w+:)?rowOff>)/,
+        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${newOff}${close}`,
       );
 
       return fullMatch.replace(inner, updated);
@@ -502,8 +503,8 @@ function updateAnchorRows(
   // Phase 2: Update <to> blocks (for twoCellAnchor).
   let toIdx = 0;
   result = result.replace(
-    /<(?:\w+:)?to\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?to>/g,
-    (fullMatch, _attrs: string, inner: string) => {
+    /<(\w+:)?to\b([^>]*)>([\s\S]*?)<\/(\w+:)?to>/g,
+    (fullMatch, _pfx1: string | undefined, _attrs: string, inner: string, _pfx2: string | undefined) => {
       if (toIdx >= rects.length) return fullMatch;
       const r = rects[toIdx];
       toIdx++;
@@ -514,13 +515,13 @@ function updateAnchorRows(
       const newOff = Math.max(0, Math.round(off));
 
       let updated = inner.replace(
-        /<(?:\w+:)?row>(\d+)<\/(?:\w+:)?row>/,
-        `<row>${row}</row>`,
+        /(<(\w+:)?row>)(\d+)(<\/(\w+:)?row>)/,
+        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${row}${close}`,
       );
 
       updated = updated.replace(
-        /<(?:\w+:)?rowOff>(\d+)<\/(?:\w+:)?rowOff>/,
-        `<rowOff>${newOff}</rowOff>`,
+        /(<(\w+:)?rowOff>)(\d+)(<\/(\w+:)?rowOff>)/,
+        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${newOff}${close}`,
       );
 
       return fullMatch.replace(inner, updated);
