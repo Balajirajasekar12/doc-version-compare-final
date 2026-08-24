@@ -22,3 +22,4 @@ export type { FormatCounters } from "./format";
 export { validateOutput, checkPartAttributes } from "./validator";
 export { convertXls, snapshotFromSheetJS } from "./xls";
 export { StyleLibrary } from "./styles";
+export { debugLog } from "./debug-log";

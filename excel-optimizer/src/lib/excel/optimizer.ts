@@ -13,6 +13,7 @@ import { loadZip, saveZip, Zip, readEntryText, listEntries } from "./zip";
 import { serializeSheet } from "./worksheet";
 import { checkNativeWellFormed, checkPartAttributes, checkPartStructure, snapshotStats, validateOutput } from "./validator";
 import { convertXls } from "./xls";
+import { debugLog } from "./debug-log";
 import { MAX_FILE_SIZE, validateUpload } from "./security";
 import {
   InputFormat,
@@ -83,6 +84,8 @@ export async function createSession(
   file: File,
   onProgress?: OnProgress,
 ): Promise<WorkSession> {
+  debugLog.clear();
+  debugLog.log('SESSION', `Creating session for: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
   validateUpload(file.name, file.size);
   if (file.size > MAX_FILE_SIZE) {
     throw new OptimizerError(
@@ -122,6 +125,11 @@ export async function createSession(
     convertedFromLegacy: format === "xls",
     warnings: [...loaded.analysis.warnings, ...warnings],
   };
+
+  debugLog.log('ANALYSIS', `Sheets: ${analysis.totalSheets}, Non-empty: ${analysis.nonEmptySheets}, Images: ${analysis.images}, Charts: ${analysis.charts}, Pivots: ${analysis.pivotTables}`);
+  for (const sa of analysis.sheets) {
+    debugLog.log('SHEET', `${sa.name}: nonEmpty=${sa.nonEmptyCells}, formulas=${sa.formulaCount}, tables=${sa.tables.length}, quality=${sa.quality.toFixed(2)}, isEmpty=${sa.isEmpty}`);
+  }
 
   return {
     fileName: file.name,
@@ -167,6 +175,7 @@ export async function runOptimization(
         counters,
       );
       if (changed) touchedSheets.push(info.name);
+      debugLog.log('FORMAT', `${info.name}: cells=${ps.cells.size}, changed=${changed}, hasDrawing=${ps.hasDrawing}`);
     }
   });
 
@@ -211,6 +220,22 @@ export async function runOptimization(
   const freshZip = await loadZip(buffer);
   const afterSnapshot = await extractSnapshot(freshZip, loaded.wb.sheets);
   const validation = validateOutput(session.beforeSnapshot, afterSnapshot);
+
+  // Content preservation check: compare cell counts per sheet
+  for (let i = 0; i < Math.max(session.beforeSnapshot.sheets.length, afterSnapshot.sheets.length); i++) {
+    const b = session.beforeSnapshot.sheets[i];
+    const a = afterSnapshot.sheets[i];
+    if (!b || !a) continue;
+    const beforeCells = b.cellCount;
+    const afterCells = a.cellCount;
+    const beforeVals = Object.keys(b.values).length;
+    const afterVals = Object.keys(a.values).length;
+    const beforeFormulas = Object.keys(b.formulas).length;
+    const afterFormulas = Object.keys(a.formulas).length;
+    if (beforeCells !== afterCells || beforeVals !== afterVals || beforeFormulas !== afterFormulas) {
+      debugLog.log('CONTENT_LOST', `${b.name}: cells ${beforeCells}→${afterCells}, values ${beforeVals}→${afterVals}, formulas ${beforeFormulas}→${afterFormulas}`);
+    }
+  }
   const [schemaViolations, structureViolations, nativeViolations] = await Promise.all([
     checkPartAttributes(freshZip, loaded.wb.sheets),
     checkPartStructure(freshZip, loaded.wb.sheets),
@@ -221,6 +246,12 @@ export async function runOptimization(
     validation.passed = false;
     validation.differences = allViolations.slice(0, 25);
   }
+
+  debugLog.log('VALIDATE', `passed=${validation.passed}, diffs=${validation.differences?.length ?? 0}`);
+  if (validation.differences) {
+    for (const d of validation.differences) debugLog.log('VALIDATE', `  - ${d}`);
+  }
+  debugLog.log('VALIDATE', `schema=${schemaViolations.length}, structure=${structureViolations.length}, native=${nativeViolations.length}`);
 
   const elapsed = Math.round(performance.now() - started);
   const beforeStats = snapshotStats(session.beforeSnapshot);
@@ -386,3 +417,4 @@ export function detectFromBytes(fileName: string, buffer: ArrayBuffer): InputFor
 }
 
 export { OptimizerError };
+export { debugLog } from "./debug-log";

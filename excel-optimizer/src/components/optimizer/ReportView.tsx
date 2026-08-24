@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import type { LucideIcon } from "lucide-react";
 import type { OptimizationReport } from "@eo/lib/excel";
 import { downloadBlob, formatBytes, formatNumber } from "./utils";
+import { debugLog } from "@eo/lib/excel";
 
 interface Props {
   report: OptimizationReport;
@@ -184,6 +185,11 @@ export function ReportView({ report, blob, downloadName, originalBlob, originalN
             <Button variant="ghost" size="sm" className="cursor-pointer" onClick={copyDiagnostics}>
               <ClipboardCopy className="size-3.5" />
               {copied ? "Copied!" : "Copy diagnostics"}
+            </Button>
+            <Button variant="ghost" size="sm" className="cursor-pointer" onClick={() => debugLog.download()}
+              title="Download detailed optimization log for debugging">
+              <FileArchive className="size-3.5" />
+              Download debug log
             </Button>
           </div>
         )}

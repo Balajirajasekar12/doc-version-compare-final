@@ -128,25 +128,11 @@ export async function fixDrawingOverlaps(
     const r = geom.parseAnchor(el);
     if (r) rects.push(r);
   }
-  if (rects.length === 0) return 0;
-
-  // Phase 1: Push images below cell content they overlap with.
-  // This handles the common case where screenshots are anchored at
-  // rows that contain test data, causing the image to cover the data.
-  const movedByContent = pushBelowContent(sheet, rects, geom);
-
-  // Phase 2: Push images below other images they overlap with.
-  const movedByImages = spreadRects(rects);
-
-  const moved = movedByContent + movedByImages;
-  if (moved === 0) return 0;
-
-  for (const r of rects) {
-    if (r.newY1 === r.y1) continue;
-    geom.writeAnchorY(r);
-  }
-  zip.file(drawingTarget, serializeXml(doc));
-  return moved;
+  // DISABLED: Image repositioning caused content deletion.
+  // Keeping original anchor positions to preserve file integrity.
+  // TODO: Investigate why pushBelowContent + spreadRects caused
+  // content rows to disappear from the output.
+  return 0;
 }
 
 /**
