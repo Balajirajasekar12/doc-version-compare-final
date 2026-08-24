@@ -243,12 +243,13 @@ export async function fixDrawingOverlaps(
 
   debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
-  // Apply repositioning using SCOPED block replacement.
-  const modifiedXml = updateAnchorRows(originalXml, rects, geom);
-
-  if (modifiedXml !== originalXml) {
-    zip.file(drawingTarget, modifiedXml);
-  }
+  // SAFETY: Do NOT rewrite the drawing XML.
+  // Previous regex-based approaches (xmldom re-serialization, whole-XML
+  // regex, scoped block replacement) all corrupted real-world drawing XML
+  // in ways Excel detects and repairs by REMOVING all drawings.
+  // The detection/reporting above is retained for the optimization report,
+  // but the drawing part is passed through byte-for-byte unchanged.
+  // Safe repositioning will be re-implemented using a validated approach.
 
   return stats;
 }
