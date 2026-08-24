@@ -299,7 +299,7 @@ class DrawingGeometry {
 
   /** EMU height of row `row` (0-based). */
   public rowEmu(row: number): number {
-    const rowEl = this.sheet.rowByNum.get(row + 1);
+    const rowEl = this.sheet.rowByNum.get(row);
     let pt = this.defaultRowHeight;
     if (rowEl) {
       const ht = parseFloat(getAttr(rowEl, "ht") ?? "");
