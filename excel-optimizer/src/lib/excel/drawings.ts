@@ -73,6 +73,26 @@ export interface AnchorRect {
   index: number;
 }
 
+export interface AnchorInfo {
+  /** Anchor index (0-based). */
+  index: number;
+  /** Anchor type. */
+  type: string;
+  /** From cell (col, row) — 0-based. */
+  fromCol: number;
+  fromRow: number;
+  /** To cell (col, row) — 0-based, -1 for oneCellAnchor. */
+  toCol: number;
+  toRow: number;
+  /** Width and height in EMU. */
+  widthEmu: number;
+  heightEmu: number;
+  /** Whether this anchor overlaps content. */
+  overlapsContent: boolean;
+  /** Overlapping anchor indices. */
+  overlapsWith: number[];
+}
+
 export interface ImageOptimizationStats {
   /** Number of images before optimization. */
   imagesBefore: number;
@@ -92,6 +112,8 @@ export interface ImageOptimizationStats {
   imagesResized: number;
   /** Number of images grouped into grids. */
   imagesGrouped: number;
+  /** Detailed per-anchor info. */
+  anchors: AnchorInfo[];
 }
 
 /**
@@ -155,6 +177,7 @@ export async function fixDrawingOverlaps(
     imagesRepositioned: 0,
     imagesResized: 0,
     imagesGrouped: 0,
+    anchors: [],
   };
 
   if (!sheet.hasDrawing) return emptyStats;
@@ -197,6 +220,24 @@ export async function fixDrawingOverlaps(
   }
   if (rects.length === 0) return emptyStats;
 
+  // Build detailed anchor info for diagnostics.
+  const anchorInfos: AnchorInfo[] = rects.map((r) => {
+    const fromRC = geom.emuToRC(r.x1, r.y1);
+    const toRC = geom.emuToRC(r.x2, r.y2);
+    return {
+      index: r.index,
+      type: r.w > 0 && r.h > 0 ? "twoCell" : "oneCell",
+      fromCol: fromRC.col,
+      fromRow: fromRC.row,
+      toCol: toRC.col,
+      toRow: toRC.row,
+      widthEmu: r.w,
+      heightEmu: r.h,
+      overlapsContent: false,
+      overlapsWith: [],
+    };
+  });
+
   // Initialize stats.
   const stats: ImageOptimizationStats = {
     imagesBefore: rects.length,
@@ -208,13 +249,38 @@ export async function fixDrawingOverlaps(
     imagesRepositioned: 0,
     imagesResized: 0,
     imagesGrouped: 0,
+    anchors: anchorInfos,
   };
 
   // Calculate content boundary.
   const contentBoundaryY = computeContentBoundary(sheet, geom);
   stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
 
+  // Mark which anchors overlap content.
+  for (let i = 0; i < rects.length; i++) {
+    if (rects[i].y1 < contentBoundaryY) {
+      anchorInfos[i].overlapsContent = true;
+    }
+  }
+
+  // Mark which anchors overlap each other.
+  for (let i = 0; i < rects.length; i++) {
+    for (let j = i + 1; j < rects.length; j++) {
+      const a = rects[i];
+      const b = rects[j];
+      if (rectsOverlap(a.x1, a.newY1, a.x2, a.newY1 + a.h,
+                       b.x1, b.newY1, b.x2, b.newY1 + b.h)) {
+        anchorInfos[i].overlapsWith.push(j);
+        anchorInfos[j].overlapsWith.push(i);
+      }
+    }
+  }
+
   debugLog.log("DRAWING", `fixDrawingOverlaps: ${rects.length} images, contentBoundary=${contentBoundaryY}, overlapsBefore=${stats.overlapsBefore}, contentConflictsBefore=${stats.contentConflictsBefore}`);
+  // Log detailed per-anchor info.
+  for (const ai of anchorInfos) {
+    debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} overlapsContent=${ai.overlapsContent} overlapsWith=[${ai.overlapsWith.join(",")}]`);
+  }
 
   // Phase 1: Push images below cell content.
   // Only push images that ACTUALLY overlap content, not all images.
@@ -629,6 +695,19 @@ class DrawingGeometry {
       acc += h;
     }
     return { row: 0, off: 0 };
+  }
+
+  /** Converts EMU (x, y) back to (col, row) for diagnostics. */
+  public emuToRC(x: number, y: number): { col: number; row: number } {
+    const { row } = this.yToRow(y);
+    // For columns, iterate similarly.
+    let acc = 0;
+    for (let c = 0; c < 1000; c++) {
+      const w = this.colEmu(c);
+      if (x < acc + w) return { col: c, row };
+      acc += w;
+    }
+    return { col: 0, row };
   }
 }
 

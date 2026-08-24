@@ -21,6 +21,7 @@ import {
   OptimizerError,
   OptimizerSettings,
   SheetAnalysis,
+  SheetDrawingAnalysis,
   SheetInfo,
   WorkbookAnalysis,
 } from "./types";
@@ -196,7 +197,9 @@ export async function runOptimization(
     imagesRepositioned: 0,
     imagesResized: 0,
     imagesGrouped: 0,
+    anchors: [],
   };
+  const perSheetDrawingAnalysis: SheetDrawingAnalysis[] = [];
   await stage("generating", "Generating optimized workbook…", 92, onProgress, async () => {
     loaded.zip.file("xl/styles.xml", loaded.styleLib.serialize());
     for (const name of touchedSheets) {
@@ -214,6 +217,15 @@ export async function runOptimization(
       if (ps.hasDrawing) {
         debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
+      // Collect per-sheet drawing analysis.
+      perSheetDrawingAnalysis.push({
+        sheetName: info.name,
+        hasDrawing: ps.hasDrawing,
+        imageCount: stats.imagesBefore,
+        overlapCount: stats.overlapsBefore,
+        contentConflictCount: stats.contentConflictsBefore,
+        anchors: stats.anchors,
+      });
       imagesReSpaced += stats.imagesRepositioned;
       // Aggregate stats across all sheets.
       totalImageStats.imagesBefore += stats.imagesBefore;
@@ -318,6 +330,7 @@ export async function runOptimization(
     imageContentConflictsAfter: totalImageStats.contentConflictsAfter,
     imagesRepositioned: totalImageStats.imagesRepositioned,
     imagesGrouped: totalImageStats.imagesGrouped,
+    drawingAnalysis: perSheetDrawingAnalysis,
     tablesOptimized: counters.tablesOptimized,
     totalRowsFormatted: counters.totalRowsFormatted,
     subtotalRowsFormatted: counters.subtotalRowsFormatted,

@@ -113,6 +113,25 @@ export interface WorkbookAnalysis {
   warnings: string[];
 }
 
+export interface SheetDrawingAnalysis {
+  sheetName: string;
+  hasDrawing: boolean;
+  imageCount: number;
+  overlapCount: number;
+  contentConflictCount: number;
+  anchors: {
+    index: number;
+    fromCol: number;
+    fromRow: number;
+    toCol: number;
+    toRow: number;
+    widthEmu: number;
+    heightEmu: number;
+    overlapsContent: boolean;
+    overlapsWith: number[];
+  }[];
+}
+
 /* ------------------------------------------------------------------ */
 /* Settings                                                            */
 /* ------------------------------------------------------------------ */
@@ -230,6 +249,8 @@ export interface OptimizationReport {
   imagesRepositioned: number;
   /** Number of images grouped into logical grids. */
   imagesGrouped: number;
+  /** Per-sheet drawing analysis details. */
+  drawingAnalysis: SheetDrawingAnalysis[];
   worksheetsPreserved: number;
   macrosPreserved: boolean;
   warnings: string[];

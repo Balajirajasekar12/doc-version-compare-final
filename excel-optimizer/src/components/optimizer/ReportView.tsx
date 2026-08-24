@@ -160,6 +160,82 @@ export function ReportView({ report, blob, downloadName, originalBlob, originalN
         </div>
       </div>
 
+      {/* Drawing Analysis — per-sheet image diagnostics */}
+      {report.drawingAnalysis && report.drawingAnalysis.some((d) => d.hasDrawing) && (
+        <div className="rounded-xl border border-border/70 bg-card/50 p-5">
+          <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-foreground">
+            <Images className="size-4 text-brand" />
+            Screenshot / Drawing Analysis
+          </h3>
+          <div className="space-y-3">
+            {report.drawingAnalysis
+              .filter((d) => d.hasDrawing)
+              .map((d) => (
+                <div key={d.sheetName} className="rounded-lg border border-border/40 bg-muted/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-foreground">{d.sheetName}</span>
+                    <div className="flex gap-2 text-[10px] font-medium">
+                      <span className="rounded bg-blue-100 px-1.5 py-0.5 text-blue-700">
+                        {d.imageCount} image{d.imageCount !== 1 ? "s" : ""}
+                      </span>
+                      {d.overlapCount > 0 && (
+                        <span className="rounded bg-red-100 px-1.5 py-0.5 text-red-700">
+                          {d.overlapCount} overlap{d.overlapCount !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                      {d.contentConflictCount > 0 && (
+                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-700">
+                          {d.contentConflictCount} content conflict{d.contentConflictCount !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {d.anchors.length > 0 && (
+                    <div className="mt-2 overflow-x-auto">
+                      <table className="w-full text-[10px] leading-tight">
+                        <thead>
+                          <tr className="text-left text-muted-foreground">
+                            <th className="pr-2">#</th>
+                            <th className="pr-2">From (col,row)</th>
+                            <th className="pr-2">To (col,row)</th>
+                            <th className="pr-2">Size (EMU)</th>
+                            <th className="pr-2">Overlap</th>
+                            <th>Content?</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {d.anchors.map((a) => (
+                            <tr key={a.index} className="border-t border-border/20">
+                              <td className="pr-2 tabular-nums">{a.index}</td>
+                              <td className="pr-2 tabular-nums">({a.fromCol},{a.fromRow})</td>
+                              <td className="pr-2 tabular-nums">({a.toCol},{a.toRow})</td>
+                              <td className="pr-2 tabular-nums">{a.widthEmu}×{a.heightEmu}</td>
+                              <td className="pr-2">
+                                {a.overlapsWith.length > 0 ? (
+                                  <span className="text-red-600">[{a.overlapsWith.join(",")}]</span>
+                                ) : (
+                                  <span className="text-emerald-600">none</span>
+                                )}
+                              </td>
+                              <td>
+                                {a.overlapsContent ? (
+                                  <span className="text-amber-600">YES</span>
+                                ) : (
+                                  <span className="text-emerald-600">no</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
       {report.convertedFromLegacy && (
         <p className="rounded-xl border border-amber-200/60 bg-amber-50/60 px-4 py-3 text-xs leading-relaxed text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
           This legacy .xls file was converted to the modern .xlsx format. Cell data, formulas, merges and basic formats were
