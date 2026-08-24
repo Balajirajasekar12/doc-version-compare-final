@@ -309,32 +309,18 @@ export async function fixDrawingOverlaps(
 
   debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
-  // Apply repositioning using namespace-safe string replacement.
-  // The key fix: preserve the XML namespace prefix (e.g. xdr:) when
-  // replacing <row>/<rowOff> values. Previous approaches stripped the
-  // prefix, producing invalid XML that Excel rejects.
-  const modifiedXml = updateAnchorRows(originalXml, rects, geom);
-
-  if (modifiedXml !== originalXml) {
-    // VALIDATION: verify the modified XML parses correctly.
-    try {
-      const testDoc = parseXml(modifiedXml);
-      const testRoot = testDoc.documentElement!;
-      const testAnchors = childElements(testRoot).filter((el) => {
-        const n = el.localName || el.nodeName;
-        return n === "twoCellAnchor" || n === "oneCellAnchor";
-      });
-      if (testAnchors.length === rects.length) {
-        // XML is valid and anchor count matches — safe to write.
-        zip.file(drawingTarget, modifiedXml);
-        debugLog.log("DRAWING", `  XML validation passed: ${testAnchors.length} anchors preserved`);
-      } else {
-        debugLog.log("DRAWING", `  XML validation FAILED: expected ${rects.length} anchors, got ${testAnchors.length} — skipping repositioning`);
-      }
-    } catch (e) {
-      debugLog.log("DRAWING", `  XML validation FAILED: parse error — skipping repositioning: ${e}`);
-    }
-  }
+  // DO NOT rewrite the drawing XML using regex or xmldom serialization.
+  // Every approach tested (xmldom re-serialization, whole-XML regex,
+  // scoped block replacement with namespace preservation) has corrupted
+  // real-world OOXML drawing XML in ways that:
+  // 1. Pass xmldom validation (too lenient)
+  // 2. But FAIL Excel's stricter OOXML parser
+  // 3. Causing "Repaired Records: Drawing" and image loss
+  //
+  // The detection/reporting above is retained for the optimization report.
+  // The drawing part is passed through byte-for-byte unchanged.
+  // Image repositioning requires an OOXML-aware library (e.g. ExcelJS)
+  // that handles namespace-aware serialization correctly.
 
   return stats;
 }
