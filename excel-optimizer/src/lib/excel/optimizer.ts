@@ -199,7 +199,11 @@ export async function runOptimization(
     for (const info of loaded.wb.sheets) {
       const ps = loaded.parsed.get(info.name);
       if (!ps) continue;
-      imagesReSpaced += await fixDrawingOverlaps(loaded.zip, ps, info.file);
+      const moved = await fixDrawingOverlaps(loaded.zip, ps, info.file);
+      if (ps.hasDrawing) {
+        debugLog.log('DRAWING', `${info.name}: hasDrawing=true, moved=${moved}`);
+      }
+      imagesReSpaced += moved;
       if (ps.casedRefs.size > 0) {
         await syncTableColumnNames(loaded.zip, ps, info.file, ps.casedRefs);
       }

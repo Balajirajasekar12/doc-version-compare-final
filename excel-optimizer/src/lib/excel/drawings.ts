@@ -21,8 +21,6 @@ import {
   firstChildElement,
   getAttr,
   parseXml,
-  serializeXml,
-  setTextContent,
   textContent,
 } from "./xml";
 import { ParsedSheet } from "./worksheet";
@@ -35,7 +33,6 @@ const DEFAULT_COL_WIDTH = 8.43; // characters
 const DEFAULT_ROW_HEIGHT = 15; // points
 
 interface AnchorRect {
-  el: XmlEl;
   x1: number;
   y1: number;
   x2: number;
@@ -107,13 +104,15 @@ export async function fixDrawingOverlaps(
   }
   if (!drawingTarget) return 0;
 
-  const xml = await readEntryText(zip, drawingTarget);
-  if (!xml) return 0;
+  const originalXml = await readEntryText(zip, drawingTarget);
+  if (!originalXml) return 0;
+
+  // Parse with xmldom for position calculation ONLY (read-only).
   let doc: XmlDoc;
   try {
-    doc = parseXml(xml);
+    doc = parseXml(originalXml);
   } catch {
-    return 0; // never touch a part the engine cannot parse
+    return 0;
   }
   const root = doc.documentElement!;
   const anchors = childElements(root).filter((el) => {
@@ -128,11 +127,53 @@ export async function fixDrawingOverlaps(
     const r = geom.parseAnchor(el);
     if (r) rects.push(r);
   }
-  // DISABLED: Image repositioning caused content deletion.
-  // Keeping original anchor positions to preserve file integrity.
-  // TODO: Investigate why pushBelowContent + spreadRects caused
-  // content rows to disappear from the output.
-  return 0;
+  if (rects.length === 0) return 0;
+
+  // Calculate new positions.
+  const movedByContent = pushBelowContent(sheet, rects, geom);
+  const movedByImages = spreadRects(rects);
+  const totalMoved = movedByContent + movedByImages;
+  if (totalMoved === 0) return 0;
+
+  // Apply repositioning using STRING REPLACEMENT on the original XML.
+  // This preserves the XML byte-for-byte except for the specific
+  // row/rowOff values that change — no xmldom re-serialization.
+  let modifiedXml = originalXml;
+
+  // Update <from><row> and <rowOff> for each anchor.
+  let fromIdx = 0;
+  modifiedXml = modifiedXml.replace(
+    /(<(?:\w+:)?from[^>]*>[\s\S]*?<(?:\w+:)?row>)(\d+)(<\/(?:\w+:)?row>[\s\S]*?<(?:\w+:)?rowOff>)(\d+)(<\/(?:\w+:)?rowOff>)/g,
+    (_match, beforeRow, _rowStr, between, _offStr, afterOff) => {
+      if (fromIdx >= rects.length) return _match;
+      const r = rects[fromIdx];
+      fromIdx++;
+      if (r.newY1 === r.y1) return _match;
+      const { row, off } = geom.yToRow(r.newY1);
+      return `${beforeRow}${row}${between}${Math.max(0, Math.round(off))}${afterOff}`;
+    },
+  );
+
+  // Update <to><row> and <rowOff> for twoCellAnchor elements.
+  let toIdx = 0;
+  modifiedXml = modifiedXml.replace(
+    /(<(?:\w+:)?to[^>]*>[\s\S]*?<(?:\w+:)?row>)(\d+)(<\/(?:\w+:)?row>[\s\S]*?<(?:\w+:)?rowOff>)(\d+)(<\/(?:\w+:)?rowOff>)/g,
+    (_match, beforeRow, _rowStr, between, _offStr, afterOff) => {
+      if (toIdx >= rects.length) return _match;
+      const r = rects[toIdx];
+      toIdx++;
+      if (r.newY1 === r.y1) return _match;
+      const newY2 = r.newY1 + r.h;
+      const { row, off } = geom.yToRow(newY2);
+      return `${beforeRow}${row}${between}${Math.max(0, Math.round(off))}${afterOff}`;
+    },
+  );
+
+  if (modifiedXml !== originalXml) {
+    zip.file(drawingTarget, modifiedXml);
+  }
+
+  return totalMoved;
 }
 
 /**
@@ -245,30 +286,16 @@ class DrawingGeometry {
       const x2 = this.colStart(col2) + off2;
       const y2 = this.rowStart(row2) + roff2;
       if (x2 <= x1 || y2 <= y1) return null;
-      return { el, x1, y1, x2, y2, newY1: y1, w: x2 - x1, h: y2 - y1 };
+      return { x1, y1, x2, y2, newY1: y1, w: x2 - x1, h: y2 - y1 };
     }
     const ext = firstChildElement(el, "ext");
     if (ext) {
       const cx = parseInt(getAttr(ext, "cx") ?? "", 10);
       const cy = parseInt(getAttr(ext, "cy") ?? "", 10);
       if (isNaN(cx) || isNaN(cy) || cx <= 0 || cy <= 0) return null;
-      return { el, x1, y1, x2: x1 + cx, y2: y1 + cy, newY1: y1, w: cx, h: cy };
+      return { x1, y1, x2: x1 + cx, y2: y1 + cy, newY1: y1, w: cx, h: cy };
     }
     return null;
-  }
-
-  /** Writes a moved anchor's new top/bottom rows back into the XML. */
-  writeAnchorY(r: AnchorRect): void {
-    const setY = (anchorEl: XmlEl | undefined, y: number) => {
-      if (!anchorEl) return;
-      const { row, off } = this.yToRow(y);
-      const rowEl = firstChildElement(anchorEl, "row");
-      const offEl = firstChildElement(anchorEl, "rowOff");
-      if (rowEl) setTextContent(rowEl, String(row));
-      if (offEl) setTextContent(offEl, String(Math.max(0, Math.round(off))));
-    };
-    setY(firstChildElement(r.el, "from"), r.newY1);
-    setY(firstChildElement(r.el, "to"), r.newY1 + r.h);
   }
 
   /** EMU width of column `col` (0-based). */
