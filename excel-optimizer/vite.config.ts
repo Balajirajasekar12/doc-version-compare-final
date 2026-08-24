@@ -2,53 +2,14 @@ import { vlyPlugin } from "@vly-ai/integrations";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
-import { existsSync } from "fs";
-import { defineConfig, type Plugin } from "vite";
-
-// Resolve @/ alias based on which directory the importing file belongs to.
-// This lets EO files (excel-optimizer/src/) resolve @/ → excel-optimizer/src/
-// while DVC files (src/) resolve @/ → src/ — same mechanism MIP uses.
-function appAwareAtAlias(): Plugin {
-  const dvcSrc = path.resolve(__dirname, "src");
-  const eoSrc = path.resolve(__dirname, "excel-optimizer/src");
-  const EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx"];
-  function resolveFile(base: string, rel: string): string | null {
-    for (const ext of EXTENSIONS) {
-      if (existsSync(path.resolve(base, rel + ext))) {
-        return path.resolve(base, rel + ext);
-      }
-    }
-    return null;
-  }
-  return {
-    name: "app-aware-at-alias",
-    enforce: "pre",
-    resolveId(id, importer) {
-      if (!id.startsWith("@/") || !importer) return null;
-      const rel = id.slice(2);
-      const importerDir = path.dirname(importer);
-      // EO files: resolve @/ to excel-optimizer/src/
-      if (importerDir.startsWith(eoSrc)) {
-        const resolved = resolveFile(eoSrc, rel);
-        if (resolved) return resolved;
-      }
-      // DVC files (and fallback): resolve @/ to src/
-      return resolveFile(dvcSrc, rel);
-    },
-  };
-}
+import { defineConfig } from "vite";
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), vlyPlugin(), tailwindcss(), appAwareAtAlias()],
+  plugins: [react(), vlyPlugin(), tailwindcss()],
   resolve: {
     alias: {
-      // @/ is handled by the appAwareAtAlias plugin above (per-file resolution)
-      // @eo/ resolves EO-specific modules to excel-optimizer/src/
-      "@eo": path.resolve(__dirname, "excel-optimizer/src"),
-      // Force MIP + EO files to use DVC's react-router copy (dual-package fix)
-      "react-router": path.resolve(__dirname, "node_modules/react-router"),
-      "react-router-dom": path.resolve(__dirname, "node_modules/react-router"),
+      "@": path.resolve(__dirname, "./src"),
     },
     // Force a single copy of React across all packages (including vlyPlugin).
     // Without this, @vly-ai/integrations can resolve its own React copy, which
@@ -65,7 +26,6 @@ export default defineConfig({
         manualChunks: {
           // Vendor chunks for large libraries
           'react-vendor': ['react', 'react-dom', 'react-router'],
-          'convex-vendor': ['convex'],
           // Large UI library chunks
           'radix-ui': [
             '@radix-ui/react-accordion',
@@ -122,7 +82,6 @@ export default defineConfig({
       'react-dom',
       'react-dom/client',
       'react-router',
-      '@convex-dev/auth/react',
       'framer-motion',
     ],
   },

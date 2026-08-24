@@ -1,0 +1,90 @@
+/**
+ * Heading text normalization.
+ *
+ * The optimizer never touches data cells, but the product's heading pass
+ * (titles, subtitles, section labels and table header rows) may normalize
+ * casing so all sheets read consistently: "PROJECT 11 TESTING SUMMARY",
+ * "test automation execution dashboard 5" and "testAutomationDashboard" all
+ * become "Project 11 Testing Summary" / "Test Automation Execution Dashboard 5".
+ *
+ * Rules (deterministic, so the validator can recognize these as intentional):
+ *  - Title-case every word: first letter upper, rest lower.
+ *  - Camel-case words are split first ("testAutomation" → "Test Automation").
+ *  - Hyphenated compounds are cased per segment ("end-to-end" → "End-to-End").
+ *  - Known acronyms (ID, URL, API, …) stay uppercase ("Test Case ID").
+ *  - Small words (of, the, and, …) stay lowercase except as the first word.
+ *  - Words without letters (numbers, punctuation) are left untouched.
+ *  - Original whitespace runs and punctuation are preserved exactly.
+ */
+const SMALL_WORDS = new Set([
+  "a", "an", "the", "and", "but", "or", "for", "nor", "on", "at", "to",
+  "from", "by", "of", "in", "with", "via", "vs", "per",
+]);
+
+const ACRONYMS = new Set([
+  "ID", "URL", "API", "SQL", "HTML", "CSS", "CSV", "PDF", "AI", "UI", "QA",
+  "HTTP", "HTTPS", "TCP", "IP", "OS", "PC", "SKU", "FAQ", "ROI", "KPI", "SSN",
+  "EIN", "ISO", "XML", "JSON", "PNG", "JPEG", "GIF", "SQL", "DB", "CRM", "ERP",
+]);
+
+/** True when `text` differs from its normalized form. */
+export function needsTitleCase(text: string): boolean {
+  return toTitleCase(text) !== text;
+}
+
+export function toTitleCase(text: string): string {
+  // Split on whitespace runs, preserving the original separators exactly.
+  const parts = text.split(/(\s+)/);
+  let firstWord = true;
+  let out = "";
+  for (const part of parts) {
+    if (!/\S/.test(part)) {
+      out += part; // whitespace separator — untouched
+      continue;
+    }
+    const cased = titleCaseWord(part, firstWord);
+    out += cased;
+    if (/\w/.test(part)) firstWord = false;
+  }
+  return out;
+}
+
+function titleCaseWord(word: string, isFirstWord: boolean): string {
+  // Hyphenated / underscore compounds: case each segment, keep the separator.
+  if (word.includes("-") || word.includes("_")) {
+    const sep = word.includes("-") ? "-" : "_";
+    return word
+      .split(sep)
+      .map((seg, i) => titleCaseWord(seg, isFirstWord && i === 0))
+      .join(sep);
+  }
+  // Camel-case boundaries: "testAutomation" → "test Automation" (joined with
+  // a space — camelCase words become separate title-cased words).
+  const spaced = word
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    // Letter→digit boundaries: "Dashboard5" → "Dashboard 5" — unless the
+    // letter run is an all-caps acronym-style token ("FY24" stays put).
+    .replace(/([a-zA-Z]{2,})(\d+)(?![A-Za-z])/g, (m, letters: string, digits: string) =>
+      /^[A-Z]+$/.test(letters) ? m : `${letters} ${digits}`,
+    );
+  let first = true;
+  return spaced
+    .split(" ")
+    .map((w) => {
+      const out = titleCaseSingle(w, isFirstWord && first);
+      if (/\w/.test(w)) first = false;
+      return out;
+    })
+    .join(" ");
+}
+
+function titleCaseSingle(w: string, isFirstWord: boolean): string {
+  if (!/[a-zA-Z]/.test(w)) return w; // numbers / punctuation only
+  // Mixed alphanumeric all-caps tokens (FY2024, Q2FY25, 2FA, Q1) stay as-is.
+  if (/\d/.test(w) && /[A-Z]/.test(w) && !/[a-z]/.test(w)) return w;
+  const lower = w.toLowerCase();
+  const upper = w.toUpperCase();
+  if (!isFirstWord && SMALL_WORDS.has(lower)) return lower;
+  if (ACRONYMS.has(upper)) return upper;
+  return w[0].toUpperCase() + lower.slice(1);
+}

@@ -1,25 +1,17 @@
-import "@vly-ai/integrations";
+import '@vly-ai/integrations';
 import { Toaster } from "@/components/ui/sonner";
-import { VlyToolbar } from "../vly-toolbar-readonly.tsx";
-import { ConvexReactClient } from "convex/react";
-import React, { StrictMode, useEffect, useState, lazy, Suspense } from "react";
+import { VlyToolbar } from "../../vly-toolbar-readonly.tsx";
+import React, { StrictMode, useEffect, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, HashRouter, Route, Routes, useLocation } from "react-router";
+import { BrowserRouter, Route, Routes, useLocation } from "react-router";
 import "./index.css";
 
-// Lazy load route components
+// Lazy load route components for better code splitting
 const Landing = lazy(() => import("./pages/Landing.tsx"));
-const Auth = lazy(() => import("./pages/Auth.tsx"));
 const Dashboard = lazy(() => import("./pages/Dashboard.tsx"));
 const NotFound = lazy(() => import("./pages/NotFound.tsx"));
 
-
-// MIP is lazy-loaded only when the URL hash starts with #/mip
-const MipApp = lazy(() => import("./mip/layout.tsx"));
-// EO is lazy-loaded only when the URL hash starts with #/eo
-const EoApp = lazy(() => import("../excel-optimizer/src/EoApp"));
-
-// Simple loading fallback
+// Simple loading fallback for route transitions
 function RouteLoading() {
   return (
     <div className="min-h-screen flex items-center justify-center">
@@ -28,6 +20,8 @@ function RouteLoading() {
   );
 }
 
+/** Silent error boundary — if VlyToolbar crashes it renders nothing instead of
+ *  crashing the whole app (e.g. hook errors in WebContainer environment). */
 class ToolbarErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { hasError: boolean }
@@ -44,6 +38,7 @@ class ToolbarErrorBoundary extends React.Component<
   }
 }
 
+/** Hard guard so runtime errors never leave the preview as a blank page. */
 class RootErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { hasError: boolean; message: string; stack: string }
@@ -81,78 +76,12 @@ class RootErrorBoundary extends React.Component<
   }
 }
 
-// Convex is optional in this repo: the validator engine is fully local and
-// there are no Convex functions yet. Only build the client when a deployment
-// URL is configured, so the app works without any env setup.
-const convexUrl = import.meta.env.VITE_CONVEX_URL as string | undefined;
-const convex = convexUrl ? new ConvexReactClient(convexUrl) : null;
-
-/**
- * Hash-based app switcher.
- * #/mip → MIP, #/eo → EO, otherwise → DVC.
- * Each app is lazy-loaded ONLY when someone navigates to its hash route.
- */
-function AppSwitcher() {
-  const [activeApp, setActiveApp] = useState<"dvc" | "mip" | "eo">(() => {
-    const h = window.location.hash;
-    if (h.startsWith("#/mip")) return "mip";
-    if (h.startsWith("#/eo")) return "eo";
-    return "dvc";
-  });
-
-  useEffect(() => {
-    function onHashChange() {
-      const h = window.location.hash;
-      if (h.startsWith("#/mip")) setActiveApp("mip");
-      else if (h.startsWith("#/eo")) setActiveApp("eo");
-      else setActiveApp("dvc");
-    }
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, []);
-
-  if (activeApp === "mip") {
-    return (
-      <HashRouter basename="/mip">
-        <Suspense fallback={<RouteLoading />}>
-          <MipApp />
-        </Suspense>
-      </HashRouter>
-    );
-  }
-
-  if (activeApp === "eo") {
-    return (
-      <HashRouter basename="/eo">
-        <Suspense fallback={<RouteLoading />}>
-          <EoApp />
-        </Suspense>
-      </HashRouter>
-    );
-  }
-
-  // DVC — existing BrowserRouter
-  return (
-    <BrowserRouter>
-      <RouteSyncer />
-      <Suspense fallback={<RouteLoading />}>
-        <Routes>
-          <Route path="/" element={<Landing />} />
-          <Route path="/auth" element={<Auth />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </Suspense>
-    </BrowserRouter>
-  );
-}
-
 function RouteSyncer() {
   const location = useLocation();
   useEffect(() => {
     window.parent.postMessage(
       { type: "iframe-route-change", path: location.pathname },
-      "*"
+      "*",
     );
   }, [location.pathname]);
 
@@ -170,14 +99,24 @@ function RouteSyncer() {
   return null;
 }
 
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
       <ToolbarErrorBoundary>
         <VlyToolbar />
       </ToolbarErrorBoundary>
-      <AppSwitcher />
+      <BrowserRouter>
+        <RouteSyncer />
+        <Suspense fallback={<RouteLoading />}>
+          <Routes>
+            <Route path="/" element={<Landing />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </Suspense>
+      </BrowserRouter>
       <Toaster />
     </RootErrorBoundary>
-  </StrictMode>
+  </StrictMode>,
 );
