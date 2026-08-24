@@ -4,7 +4,7 @@
  */
 import { InputFormat, OptimizerError } from "./types";
 
-export const MAX_FILE_SIZE = 30 * 1024 * 1024; // 30 MB
+export const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 export const MAX_CELLS = 1_000_000; // soft guard, warn only
 
 export interface UploadInfo {
@@ -16,7 +16,7 @@ export function validateUpload(fileName: string, size: number): void {
   if (size <= 0) throw new OptimizerError("The file appears to be empty.");
   if (size > MAX_FILE_SIZE) {
     throw new OptimizerError(
-      "The file is larger than the 30 MB limit.",
+      "The file is larger than the 50 MB limit.",
       "Please split the workbook or remove embedded media and try again.",
     );
   }

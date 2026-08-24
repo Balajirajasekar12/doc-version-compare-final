@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
-import { FileSpreadsheet, History, ShieldCheck, Sparkles } from "lucide-react";
+import { FileSpreadsheet, History, ShieldCheck, Sparkles, Zap, TrendingUp, Clock } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { OptimizerApp } from "@eo/components/optimizer/OptimizerApp";
 import { formatNumber } from "@eo/components/optimizer/utils";
@@ -103,7 +103,7 @@ export default function Dashboard() {
       </header>
 
       <div className="mx-auto w-full max-w-6xl px-5 py-10">
-        {/* ------------------------------ Intro ----------------------------- */}
+        {/* ------------------------------ Hero ----------------------------- */}
         <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">
@@ -128,6 +128,31 @@ export default function Dashboard() {
             Free · private · no AI required
           </motion.div>
         </div>
+
+        {/* ------------------------------ Stats ------------------------------ */}
+        {history.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4"
+          >
+            {[
+              { label: "Total optimizations", value: history.length, icon: TrendingUp, color: "text-brand" },
+              { label: "Cells styled", value: history.reduce((s, h) => s + h.cellsStandardized, 0), icon: Sparkles, color: "text-emerald-500" },
+              { label: "Tables optimized", value: history.reduce((s, h) => s + h.tablesOptimized, 0), icon: FileSpreadsheet, color: "text-blue-500" },
+              { label: "Avg. time", value: `${Math.round(history.reduce((s, h) => s + h.elapsedMs, 0) / history.length / 1000)}s`, icon: Clock, color: "text-amber-500" },
+            ].map((stat) => (
+              <div key={stat.label} className="rounded-xl border border-border/60 bg-card/50 p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-muted-foreground">{stat.label}</span>
+                  <stat.icon size={12} className={stat.color} />
+                </div>
+                <p className="mt-1 text-lg font-bold">{stat.value}</p>
+              </div>
+            ))}
+          </motion.div>
+        )}
 
         {/* ------------------------------ Main ------------------------------ */}
         <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-[1fr_300px]">
