@@ -309,13 +309,32 @@ export async function fixDrawingOverlaps(
 
   debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
-  // SAFETY: Do NOT rewrite the drawing XML.
-  // Previous regex-based approaches (xmldom re-serialization, whole-XML
-  // regex, scoped block replacement) all corrupted real-world drawing XML
-  // in ways Excel detects and repairs by REMOVING all drawings.
-  // The detection/reporting above is retained for the optimization report,
-  // but the drawing part is passed through byte-for-byte unchanged.
-  // Safe repositioning will be re-implemented using a validated approach.
+  // Apply repositioning using namespace-safe string replacement.
+  // The key fix: preserve the XML namespace prefix (e.g. xdr:) when
+  // replacing <row>/<rowOff> values. Previous approaches stripped the
+  // prefix, producing invalid XML that Excel rejects.
+  const modifiedXml = updateAnchorRows(originalXml, rects, geom);
+
+  if (modifiedXml !== originalXml) {
+    // VALIDATION: verify the modified XML parses correctly.
+    try {
+      const testDoc = parseXml(modifiedXml);
+      const testRoot = testDoc.documentElement!;
+      const testAnchors = childElements(testRoot).filter((el) => {
+        const n = el.localName || el.nodeName;
+        return n === "twoCellAnchor" || n === "oneCellAnchor";
+      });
+      if (testAnchors.length === rects.length) {
+        // XML is valid and anchor count matches — safe to write.
+        zip.file(drawingTarget, modifiedXml);
+        debugLog.log("DRAWING", `  XML validation passed: ${testAnchors.length} anchors preserved`);
+      } else {
+        debugLog.log("DRAWING", `  XML validation FAILED: expected ${rects.length} anchors, got ${testAnchors.length} — skipping repositioning`);
+      }
+    } catch (e) {
+      debugLog.log("DRAWING", `  XML validation FAILED: parse error — skipping repositioning: ${e}`);
+    }
+  }
 
   return stats;
 }
