@@ -96,7 +96,7 @@ export async function fixDrawingOverlaps(
   sheet: ParsedSheet,
   sheetFile: string,
 ): Promise<number> {
-  if (!sheet.hasDrawing) { console.log(`[EO-DRAW] skip: no drawing for ${sheetFile}`); return 0; }
+  if (!sheet.hasDrawing) return 0;
   const rels = await resolveSheetRels(zip, sheetFile);
   let drawingTarget: string | null = null;
   for (const rel of rels.values()) {
@@ -105,7 +105,7 @@ export async function fixDrawingOverlaps(
       break;
     }
   }
-  if (!drawingTarget) { console.log(`[EO-DRAW] skip: no drawing target in rels for ${sheetFile}`); return 0; }
+  if (!drawingTarget) return 0;
 
   const xml = await readEntryText(zip, drawingTarget);
   if (!xml) return 0;
@@ -128,8 +128,7 @@ export async function fixDrawingOverlaps(
     const r = geom.parseAnchor(el);
     if (r) rects.push(r);
   }
-  if (rects.length === 0) { console.log(`[EO-DRAW] skip: no parsed rects for ${sheetFile}`); return 0; }
-  console.log(`[EO-DRAW] fixDrawingOverlaps: ${sheetFile}, drawing=${drawingTarget}, anchors=${anchors.length}, rects=${rects.length}`);
+  if (rects.length === 0) return 0;
 
   // Phase 1: Push images below cell content they overlap with.
   // This handles the common case where screenshots are anchored at
@@ -140,7 +139,6 @@ export async function fixDrawingOverlaps(
   const movedByImages = spreadRects(rects);
 
   const moved = movedByContent + movedByImages;
-  console.log(`[EO-DRAW] Final: movedByContent=${movedByContent}, movedByImages=${movedByImages}, total=${moved}`);
   if (moved === 0) return 0;
 
   for (const r of rects) {
@@ -148,7 +146,6 @@ export async function fixDrawingOverlaps(
     geom.writeAnchorY(r);
   }
   zip.file(drawingTarget, serializeXml(doc));
-  console.log(`[EO-DRAW] Drawing XML updated and written to ZIP`);
   return moved;
 }
 
@@ -187,10 +184,6 @@ function pushBelowContent(
   // row AFTER the last content — this is where images should start.
   const contentBoundaryY = geom.rowStart(maxContentRow + 1);
 
-  console.log(`[EO-DRAW] pushBelowContent: maxContentRow=${maxContentRow}, contentBoundaryY=${contentBoundaryY}, images=${rects.length}`);
-  console.log(`[EO-DRAW] Image positions:`, rects.map(r => `y1=${Math.round(r.y1)} h=${Math.round(r.h)}`));
-  console.log(`[EO-DRAW] Overlapping:`, rects.filter(r => r.y1 < contentBoundaryY).length);
-
   let moved = 0;
   for (const r of rects) {
     // Only push images whose top is above the content boundary.
@@ -201,18 +194,16 @@ function pushBelowContent(
     }
   }
 
-  console.log(`[EO-DRAW] pushBelowContent result: moved=${moved}, contentBoundaryY=${Math.round(contentBoundaryY)}`);
-
   return moved;
 }
 
 /** Pushes overlapping rects down (keeping x and size); returns moved count. */
 function spreadRects(rects: AnchorRect[]): number {
-  const ordered = [...rects].sort((a, b) => a.y1 - b.y1 || a.x1 - b.x1);
+  const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
   const placed: { x1: number; y1: number; x2: number; y2: number }[] = [];
   let moved = 0;
   for (const r of ordered) {
-    let y = r.y1;
+    let y = r.newY1;
     for (;;) {
       const blockers = placed.filter(
         (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.y1 < y + r.h && p.y2 > y,
