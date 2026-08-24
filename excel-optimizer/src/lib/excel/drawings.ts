@@ -30,7 +30,7 @@ import { ParsedSheet } from "./worksheet";
 /** EMU per pixel (914400 EMU per inch / 96 px per inch). */
 const EMU_PER_PX = 9525;
 /** Pixels added between drawings that were pushed apart. */
-const SPACING_PX = 3;
+const SPACING_PX = 15;
 const DEFAULT_COL_WIDTH = 8.43; // characters
 const DEFAULT_ROW_HEIGHT = 15; // points
 

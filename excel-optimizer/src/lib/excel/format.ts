@@ -6,7 +6,7 @@
  */
 import { Intensity, intensityFor } from "./detect";
 import { FontSpec, StyleLibrary, XfAlignment } from "./styles";
-import { toTitleCase } from "./casing";
+import { toTitleCase, correctTypos } from "./casing";
 import {
   ParsedSheet,
   applyAutoFilter,
@@ -313,12 +313,14 @@ export function formatSheet(
   return dirty;
 }
 
-/** Rewrites a heading cell's text to title case. Returns true when changed. */
+/** Rewrites a heading cell's text to title case (with typo corrections). Returns true when changed. */
 function applyTitleCase(sheet: ParsedSheet, cell: CellData): boolean {
   if (cell.kind !== "string" || cell.hasFormula) return false;
   const text = cell.text ?? "";
   if (!text) return false;
-  const cased = toTitleCase(text);
+  // Apply typo/spelling corrections first, then title case
+  const corrected = correctTypos(text);
+  const cased = toTitleCase(corrected);
   if (cased === text) return false;
   if (setCellText(sheet, cell.row, cell.col, cased)) {
     sheet.casedRefs.add(cell.ref);

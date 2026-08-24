@@ -25,11 +25,47 @@ const ACRONYMS = new Set([
   "ID", "URL", "API", "SQL", "HTML", "CSS", "CSV", "PDF", "AI", "UI", "QA",
   "HTTP", "HTTPS", "TCP", "IP", "OS", "PC", "SKU", "FAQ", "ROI", "KPI", "SSN",
   "EIN", "ISO", "XML", "JSON", "PNG", "JPEG", "GIF", "SQL", "DB", "CRM", "ERP",
+  // HIGHMARK / enterprise abbreviations
+  "SFB", "PHI", "HIPAA", "EBS", "HBS", "ASO", "HDHP", "PPO", "EOB",
+  "ADF", "BAU", "SLA", "KPI", "RPT", "ADM", "DEV", "TST", "PRD",
 ]);
 
 /** True when `text` differs from its normalized form. */
 export function needsTitleCase(text: string): boolean {
   return toTitleCase(text) !== text;
+}
+
+// ============================================================
+// Typo / spelling corrections for common enterprise document errors.
+// Applied only to heading cells (row kinds: title, heading, subtitle).
+// Does NOT touch data cells.
+// ============================================================
+
+const TYPO_CORRECTIONS: Array<{ pattern: RegExp; replacement: string }> = [
+  // HIGHMARK-specific: "Claim S B Ased Adminive" → "Claims Based Administrative"
+  { pattern: /\bClaim\s+S\s+B\s+Ased\s+Adminive\b/gi, replacement: "Claims Based Administrative" },
+  { pattern: /\bClaims?\s+S\s+B\s+Ased\b/gi, replacement: "Claims Based" },
+  { pattern: /\bAdminive\b/gi, replacement: "Administrative" },
+  // "B lllpackage" → "Bill Package" (extra L + missing L + space)
+  { pattern: /\bB\s+lllpackage\b/gi, replacement: "Bill Package" },
+  { pattern: /\blllpackage\b/gi, replacement: "Bill Package" },
+  // "llpackage" → "Bill Package" (missing B)
+  { pattern: /\bllpackage\b/gi, replacement: "Bill Package" },
+  // Generic: multiple consecutive same letters (OCR/transcription errors)
+  // e.g., "lll" → "ll" but only in known patterns to avoid false positives
+  // "Sfb" → "SFB" (handled by ACRONYMS in titleCaseSingle)
+];
+
+/**
+ * Applies deterministic typo corrections to heading text.
+ * Returns the corrected text, or the original if no corrections matched.
+ */
+export function correctTypos(text: string): string {
+  let result = text;
+  for (const { pattern, replacement } of TYPO_CORRECTIONS) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
 }
 
 export function toTitleCase(text: string): string {
