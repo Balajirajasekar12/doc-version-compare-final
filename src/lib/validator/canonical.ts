@@ -258,7 +258,13 @@ function normalizeCellLines(inputLines: string[]): string[] {
     // "Claims Paid Thru" → "07/31/2026 (Bill Cycle 5 of 5)").
     if (i + 1 < inputLines.length && isAlphaKey(trimmed) && trimmed.length <= 25) {
       const nextTrimmed = inputLines[i + 1].trim();
-      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60) {
+      // CRITICAL: Do NOT pair if the next line is already structured data:
+      // - contains 2+ consecutive spaces (space-separated table row)
+      // - contains pipe characters (already pipe-delimited)
+      // - contains tab characters (already tab-delimited)
+      // These should be parsed by extractFieldValuesFromText, not consumed here.
+      const isStructuredData = /\S\s{2,}\S/.test(nextTrimmed) || nextTrimmed.includes("|") || nextTrimmed.includes("\t");
+      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60 && !isStructuredData) {
         // Scan forward for additional key-value pairs
         let fallbackCount = 0;
         let fbIdx = i + 2;
@@ -268,6 +274,8 @@ function normalizeCellLines(inputLines: string[]): string[] {
           const v = inputLines[fbIdx + 1].trim();
           if (k === "" || v === "") { fbEnd = false; break; }
           if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
+          // Also reject if the next value line is structured data
+          if (/\S\s{2,}\S/.test(v) || v.includes("|") || v.includes("\t")) { fbEnd = false; break; }
           fallbackCount++;
           fbIdx += 2;
         }
@@ -286,6 +294,7 @@ function normalizeCellLines(inputLines: string[]): string[] {
             const v = inputLines[fbIdx + 1].trim();
             if (k === "" || v === "") break;
             if (!isKeyLike(k)) break;
+            if (/\S\s{2,}\S/.test(v) || v.includes("|") || v.includes("\t")) break;
             result.push(`${k} | ${v}`);
             fbIdx += 2;
           }
@@ -979,6 +988,105 @@ export function compareCanonical(
         });
         unmatchedComparing.delete(cIdx);
         for (const { idx: bIdx } of contained) {
+          unmatchedBaseline.delete(bIdx);
+        }
+      }
+    }
+  }
+
+  // Phase 7: Aggregate token matching.
+  // When one format produces a merged line and another produces split lines,
+  // the tokens from the split items should cover the tokens in the merged item.
+  // This handles cases like:
+  //   PDF: paragraph("Claims Paid Thru 07/31/2026")
+  //   RTF: field_value("claims paid thru", "07/31/2026")
+  //   Token set of paragraph ⊇ tokens of field_value → MATCH
+  function tokenizeForMatch(text: string): Set<string> {
+    return new Set(
+      normalizeText(text)
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter(t => t.length > 0),
+    );
+  }
+
+  // Match unmatched baseline items against groups of unmatched comparing items
+  const unmatchedBaseArr = Array.from(unmatchedBaseline).map(i => ({ el: baseline.items[i], idx: i }));
+  const unmatchedCompArr = Array.from(unmatchedComparing).map(i => ({ el: comparing.items[i], idx: i }));
+
+  // For each unmatched baseline item, find ALL unmatched comparing items
+  // whose tokens are a subset.  If the union of their tokens covers ≥70%
+  // of the baseline tokens, match them.
+  for (const { el: bEl, idx: bIdx } of unmatchedBaseArr) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bTokens = tokenizeForMatch(bEl.value);
+    if (bTokens.size < 2) continue; // Need at least 2 tokens to compare
+
+    const matchingComp: Array<{ el: ContentItem; idx: number }> = [];
+    const compTokenUnion = new Set<string>();
+    for (const { el: cEl, idx: cIdx } of unmatchedCompArr) {
+      if (!unmatchedComparing.has(cIdx)) continue;
+      const cTokens = tokenizeForMatch(cEl.value);
+      if (cTokens.size === 0) continue;
+      // Check if all comparing tokens are in baseline tokens
+      const isSubset = Array.from(cTokens).every(t => bTokens.has(t));
+      if (isSubset) {
+        matchingComp.push({ el: cEl, idx: cIdx });
+        for (const t of cTokens) compTokenUnion.add(t);
+      }
+    }
+    if (matchingComp.length >= 1) {
+      // Check coverage: comparing tokens cover at least 70% of baseline tokens
+      const overlap = Array.from(bTokens).filter(t => compTokenUnion.has(t)).length;
+      const coverage = overlap / bTokens.size;
+      if (coverage >= 0.7) {
+        matched.push({
+          baseline: bEl,
+          comparing: matchingComp[0].el,
+          identical: normalizeText(bEl.value).toLowerCase() ===
+            matchingComp.map(c => normalizeText(c.el.value)).join(' ').toLowerCase(),
+        });
+        unmatchedBaseline.delete(bIdx);
+        for (const { idx: cIdx } of matchingComp) {
+          unmatchedComparing.delete(cIdx);
+        }
+      }
+    }
+  }
+
+  // Same in reverse: matching comparing items against groups of baseline items
+  const unmatchedCompArr2 = Array.from(unmatchedComparing).map(i => ({ el: comparing.items[i], idx: i }));
+  const unmatchedBaseArr2 = Array.from(unmatchedBaseline).map(i => ({ el: baseline.items[i], idx: i }));
+
+  for (const { el: cEl, idx: cIdx } of unmatchedCompArr2) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cTokens = tokenizeForMatch(cEl.value);
+    if (cTokens.size < 2) continue;
+
+    const matchingBase: Array<{ el: ContentItem; idx: number }> = [];
+    const baseTokenUnion = new Set<string>();
+    for (const { el: bEl, idx: bIdx } of unmatchedBaseArr2) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      const bTokens = tokenizeForMatch(bEl.value);
+      if (bTokens.size === 0) continue;
+      const isSubset = Array.from(bTokens).every(t => cTokens.has(t));
+      if (isSubset) {
+        matchingBase.push({ el: bEl, idx: bIdx });
+        for (const t of bTokens) baseTokenUnion.add(t);
+      }
+    }
+    if (matchingBase.length >= 1) {
+      const overlap = Array.from(cTokens).filter(t => baseTokenUnion.has(t)).length;
+      const coverage = overlap / cTokens.size;
+      if (coverage >= 0.7) {
+        matched.push({
+          baseline: matchingBase[0].el,
+          comparing: cEl,
+          identical: normalizeText(cEl.value).toLowerCase() ===
+            matchingBase.map(b => normalizeText(b.el.value)).join(' ').toLowerCase(),
+        });
+        unmatchedComparing.delete(cIdx);
+        for (const { idx: bIdx } of matchingBase) {
           unmatchedBaseline.delete(bIdx);
         }
       }

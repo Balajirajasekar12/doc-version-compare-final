@@ -160,7 +160,13 @@ function isPipeTableRow(line: string): boolean {
     // "Claims Paid Thru" → "07/31/2026 (Bill Cycle 5 of 5)").
     if (i + 1 < inputLines.length && isAlphaKey(trimmed) && trimmed.length <= 25) {
       const nextTrimmed = inputLines[i + 1].trim();
-      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60) {
+      // CRITICAL: Do NOT pair if the next line is already structured data:
+      // - contains 2+ consecutive spaces (space-separated table row)
+      // - contains pipe characters (already pipe-delimited)
+      // - contains tab characters (already tab-delimited)
+      // These should be parsed by extractKVFromText, not consumed here.
+      const isStructuredData = /\S\s{2,}\S/.test(nextTrimmed) || nextTrimmed.includes("|") || nextTrimmed.includes("\t");
+      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60 && !isStructuredData) {
         let fallbackCount = 0;
         let fbIdx = i + 2;
         let fbEnd = true;
@@ -169,6 +175,8 @@ function isPipeTableRow(line: string): boolean {
           const v = inputLines[fbIdx + 1].trim();
           if (k === "" || v === "") { fbEnd = false; break; }
           if (!isKeyLike(k) || !isValue(v)) { fbEnd = false; break; }
+          // Also reject if the next value line is structured data
+          if (/\S\s{2,}\S/.test(v) || v.includes("|") || v.includes("\t")) { fbEnd = false; break; }
           fallbackCount++;
           fbIdx += 2;
         }
@@ -182,6 +190,7 @@ function isPipeTableRow(line: string): boolean {
             const v = inputLines[fbIdx + 1].trim();
             if (k === "" || v === "") break;
             if (!isKeyLike(k)) break;
+            if (/\S\s{2,}\S/.test(v) || v.includes("|") || v.includes("\t")) break;
             result.push(`${k} | ${v}`);
             fbIdx += 2;
           }
