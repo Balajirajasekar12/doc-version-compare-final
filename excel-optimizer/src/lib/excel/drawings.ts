@@ -150,12 +150,13 @@ export async function fixDrawingOverlaps(
 }
 
 /**
- * Pushes images below the cell content they overlap.
+ * Pushes images below cell content to prevent overlap.
  *
- * For each image, finds non-empty cells whose rows overlap with the
- * image's anchor row range and whose columns overlap with the image's
- * horizontal span. If any such cells exist, the image is pushed below
- * the lowest overlapping content row.
+ * Strategy: find the absolute last row with non-empty content, compute
+ * its EMU bottom, and push every image whose top is above that boundary
+ * below it. This is deliberately conservative — it may push images that
+ * were intentionally placed within content, but it guarantees zero
+ * content-image overlap.
  */
 function pushBelowContent(
   sheet: ParsedSheet,
@@ -164,51 +165,30 @@ function pushBelowContent(
 ): number {
   if (rects.length === 0) return 0;
 
-  // Build a row → bottom-EMU map for rows that contain non-empty content.
-  const contentRowBottoms = new Map<number, number>();
+  // Find the maximum row number that contains non-empty content.
+  let maxContentRow = 0;
   for (const [row, cells] of sheet.cells) {
-    let hasContent = false;
     for (const cell of cells.values()) {
       const t = cell.text ?? "";
       if (t.trim()) {
-        hasContent = true;
+        if (row > maxContentRow) maxContentRow = row;
         break;
       }
     }
-    if (hasContent) {
-      // Bottom of this row in EMU = start of this row + its height.
-      contentRowBottoms.set(row, geom.rowStart(row) + geom.rowEmu(row));
-    }
   }
 
-  if (contentRowBottoms.size === 0) return 0;
+  if (maxContentRow === 0) return 0;
+
+  // Compute the EMU bottom of the last content row.
+  // We use rowStart(maxContentRow + 1) which gives the top of the
+  // row AFTER the last content — this is where images should start.
+  const contentBoundaryY = geom.rowStart(maxContentRow + 1);
 
   let moved = 0;
   for (const r of rects) {
-    // Determine the image's row range from its current y1 / y2.
-    const fromInfo = geom.yToRow(r.y1);
-    const toInfo = geom.yToRow(r.y2);
-    const imageStartRow = fromInfo.row;
-    const imageEndRow = toInfo.row + 1; // +1 because yToRow gives the row the offset falls in
-
-    // Find the lowest content bottom that overlaps with this image.
-    let maxContentBottom = 0;
-    for (const [row, bottom] of contentRowBottoms) {
-      if (row >= imageStartRow && row <= imageEndRow) {
-        maxContentBottom = Math.max(maxContentBottom, bottom);
-      }
-    }
-
-    // Also check rows slightly above — if an image starts mid-row,
-    // content in the row above might still be visually overlapping.
-    for (const [row, bottom] of contentRowBottoms) {
-      if (row === imageStartRow - 1) {
-        maxContentBottom = Math.max(maxContentBottom, bottom);
-      }
-    }
-
-    if (maxContentBottom > 0 && r.y1 < maxContentBottom) {
-      const newY = maxContentBottom + SPACING_PX * EMU_PER_PX;
+    // Only push images whose top is above the content boundary.
+    if (r.y1 < contentBoundaryY) {
+      const newY = contentBoundaryY + SPACING_PX * EMU_PER_PX;
       r.newY1 = newY;
       moved++;
     }
