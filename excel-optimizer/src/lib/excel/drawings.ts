@@ -89,15 +89,145 @@ function normalizeRelTarget(dir: string, target: string): string {
  * were moved (0 means the drawing part was left untouched).
  */
 export async function fixDrawingOverlaps(
-  _zip: Zip,
-  _sheet: ParsedSheet,
-  _sheetFile: string,
+  zip: Zip,
+  sheet: ParsedSheet,
+  sheetFile: string,
 ): Promise<number> {
-  // DISABLED: Both xmldom re-serialization and regex string replacement
-  // corrupt Excel drawing XML, causing image loss and Excel repair dialogs.
-  // Images are preserved byte-for-byte by not touching the drawing XML at all.
-  // The original file's image positions are kept exactly as-is.
-  return 0;
+  if (!sheet.hasDrawing) return 0;
+  const rels = await resolveSheetRels(zip, sheetFile);
+  let drawingTarget: string | null = null;
+  for (const rel of rels.values()) {
+    if (rel.type.includes("/drawing")) {
+      drawingTarget = rel.target;
+      break;
+    }
+  }
+  if (!drawingTarget) return 0;
+
+  const originalXml = await readEntryText(zip, drawingTarget);
+  if (!originalXml) return 0;
+
+  // Parse with xmldom for position calculation ONLY (read-only).
+  let doc: XmlDoc;
+  try {
+    doc = parseXml(originalXml);
+  } catch {
+    return 0;
+  }
+  const root = doc.documentElement!;
+  const anchors = childElements(root).filter((el) => {
+    const n = el.localName || el.nodeName;
+    return n === "twoCellAnchor" || n === "oneCellAnchor";
+  });
+  if (anchors.length === 0) return 0;
+
+  const geom = new DrawingGeometry(sheet);
+  const rects: AnchorRect[] = [];
+  for (const el of anchors) {
+    const r = geom.parseAnchor(el);
+    if (r) rects.push(r);
+  }
+  if (rects.length === 0) return 0;
+
+  // Calculate new positions.
+  const movedByContent = pushBelowContent(sheet, rects, geom);
+  const movedByImages = spreadRects(rects);
+  const totalMoved = movedByContent + movedByImages;
+  if (totalMoved === 0) return 0;
+
+  // Apply repositioning using SCOPED block replacement.
+  // Instead of a whole-XML regex that can match across anchor boundaries,
+  // we match each <from>...</from> and <to>...</to> block individually,
+  // then replace <row>/<rowOff> values ONLY within that block.
+  // This prevents the cross-boundary corruption that broke drawing30.xml/drawing33.xml.
+  const modifiedXml = updateAnchorRows(originalXml, rects, geom);
+
+  if (modifiedXml !== originalXml) {
+    zip.file(drawingTarget, modifiedXml);
+  }
+
+  return totalMoved;
+}
+
+/**
+ * Updates <row>/<rowOff> values in <from> and <to> blocks using scoped
+ * replacement. Each block is matched independently, preventing cross-anchor
+ * boundary corruption.
+ *
+ * Previous approaches failed because:
+ * 1. xmldom re-serialization corrupts namespace prefixes → images lost
+ * 2. Whole-XML regex with [\s\S]*? wildcards matches across anchor
+ *    boundaries → corrupts specific drawings (drawing30.xml, drawing33.xml)
+ *
+ * This approach matches each <from>...</from> block as a complete unit,
+ * then replaces values ONLY within that block.
+ */
+function updateAnchorRows(
+  xml: string,
+  rects: AnchorRect[],
+  geom: DrawingGeometry,
+): string {
+  let result = xml;
+
+  // Phase 1: Update <from> blocks.
+  // Match each <from>...</from> as a complete unit.
+  let fromIdx = 0;
+  result = result.replace(
+    /<(?:\w+:)?from\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?from>/g,
+    (fullMatch, _attrs: string, inner: string) => {
+      if (fromIdx >= rects.length) return fullMatch;
+      const r = rects[fromIdx];
+      fromIdx++;
+      if (r.newY1 === r.y1) return fullMatch; // not moved
+
+      const { row, off } = geom.yToRow(r.newY1);
+      const newOff = Math.max(0, Math.round(off));
+
+      // Replace <row> within this <from> block only.
+      let updated = inner.replace(
+        /<(?:\w+:)?row>(\d+)<\/(?:\w+:)?row>/,
+        `<row>${row}</row>`,
+      );
+
+      // Replace <rowOff> within this <from> block only.
+      updated = updated.replace(
+        /<(?:\w+:)?rowOff>(\d+)<\/(?:\w+:)?rowOff>/,
+        `<rowOff>${newOff}</rowOff>`,
+      );
+
+      return fullMatch.replace(inner, updated);
+    },
+  );
+
+  // Phase 2: Update <to> blocks (for twoCellAnchor).
+  let toIdx = 0;
+  result = result.replace(
+    /<(?:\w+:)?to\b([^>]*)>([\s\S]*?)<\/(?:\w+:)?to>/g,
+    (fullMatch, _attrs: string, inner: string) => {
+      if (toIdx >= rects.length) return fullMatch;
+      const r = rects[toIdx];
+      toIdx++;
+      if (r.newY1 === r.y1) return fullMatch; // not moved
+
+      const newY2 = r.newY1 + r.h;
+      const { row, off } = geom.yToRow(newY2);
+      const newOff = Math.max(0, Math.round(off));
+
+      let updated = inner.replace(
+        /<(?:\w+:)?row>(\d+)<\/(?:\w+:)?row>/,
+        `<row>${row}</row>`,
+      );
+
+      updated = updated.replace(
+        /<(?:\w+:)?rowOff>(\d+)<\/(?:\w+:)?rowOff>/,
+        `<rowOff>${newOff}</rowOff>`,
+      );
+
+      return fullMatch.replace(inner, updated);
+    },
+  );
+
+  return result;
 }
 
 /**
