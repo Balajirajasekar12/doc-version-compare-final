@@ -89,91 +89,15 @@ function normalizeRelTarget(dir: string, target: string): string {
  * were moved (0 means the drawing part was left untouched).
  */
 export async function fixDrawingOverlaps(
-  zip: Zip,
-  sheet: ParsedSheet,
-  sheetFile: string,
+  _zip: Zip,
+  _sheet: ParsedSheet,
+  _sheetFile: string,
 ): Promise<number> {
-  if (!sheet.hasDrawing) return 0;
-  const rels = await resolveSheetRels(zip, sheetFile);
-  let drawingTarget: string | null = null;
-  for (const rel of rels.values()) {
-    if (rel.type.includes("/drawing")) {
-      drawingTarget = rel.target;
-      break;
-    }
-  }
-  if (!drawingTarget) return 0;
-
-  const originalXml = await readEntryText(zip, drawingTarget);
-  if (!originalXml) return 0;
-
-  // Parse with xmldom for position calculation ONLY (read-only).
-  let doc: XmlDoc;
-  try {
-    doc = parseXml(originalXml);
-  } catch {
-    return 0;
-  }
-  const root = doc.documentElement!;
-  const anchors = childElements(root).filter((el) => {
-    const n = el.localName || el.nodeName;
-    return n === "twoCellAnchor" || n === "oneCellAnchor";
-  });
-  if (anchors.length === 0) return 0;
-
-  const geom = new DrawingGeometry(sheet);
-  const rects: AnchorRect[] = [];
-  for (const el of anchors) {
-    const r = geom.parseAnchor(el);
-    if (r) rects.push(r);
-  }
-  if (rects.length === 0) return 0;
-
-  // Calculate new positions.
-  const movedByContent = pushBelowContent(sheet, rects, geom);
-  const movedByImages = spreadRects(rects);
-  const totalMoved = movedByContent + movedByImages;
-  if (totalMoved === 0) return 0;
-
-  // Apply repositioning using STRING REPLACEMENT on the original XML.
-  // This preserves the XML byte-for-byte except for the specific
-  // row/rowOff values that change — no xmldom re-serialization.
-  let modifiedXml = originalXml;
-
-  // Update <from><row> and <rowOff> for each anchor.
-  let fromIdx = 0;
-  modifiedXml = modifiedXml.replace(
-    /(<(?:\w+:)?from[^>]*>[\s\S]*?<(?:\w+:)?row>)(\d+)(<\/(?:\w+:)?row>[\s\S]*?<(?:\w+:)?rowOff>)(\d+)(<\/(?:\w+:)?rowOff>)/g,
-    (_match, beforeRow, _rowStr, between, _offStr, afterOff) => {
-      if (fromIdx >= rects.length) return _match;
-      const r = rects[fromIdx];
-      fromIdx++;
-      if (r.newY1 === r.y1) return _match;
-      const { row, off } = geom.yToRow(r.newY1);
-      return `${beforeRow}${row}${between}${Math.max(0, Math.round(off))}${afterOff}`;
-    },
-  );
-
-  // Update <to><row> and <rowOff> for twoCellAnchor elements.
-  let toIdx = 0;
-  modifiedXml = modifiedXml.replace(
-    /(<(?:\w+:)?to[^>]*>[\s\S]*?<(?:\w+:)?row>)(\d+)(<\/(?:\w+:)?row>[\s\S]*?<(?:\w+:)?rowOff>)(\d+)(<\/(?:\w+:)?rowOff>)/g,
-    (_match, beforeRow, _rowStr, between, _offStr, afterOff) => {
-      if (toIdx >= rects.length) return _match;
-      const r = rects[toIdx];
-      toIdx++;
-      if (r.newY1 === r.y1) return _match;
-      const newY2 = r.newY1 + r.h;
-      const { row, off } = geom.yToRow(newY2);
-      return `${beforeRow}${row}${between}${Math.max(0, Math.round(off))}${afterOff}`;
-    },
-  );
-
-  if (modifiedXml !== originalXml) {
-    zip.file(drawingTarget, modifiedXml);
-  }
-
-  return totalMoved;
+  // DISABLED: Both xmldom re-serialization and regex string replacement
+  // corrupt Excel drawing XML, causing image loss and Excel repair dialogs.
+  // Images are preserved byte-for-byte by not touching the drawing XML at all.
+  // The original file's image positions are kept exactly as-is.
+  return 0;
 }
 
 /**
