@@ -86,7 +86,7 @@ export async function createSession(
   validateUpload(file.name, file.size);
   if (file.size > MAX_FILE_SIZE) {
     throw new OptimizerError(
-      "The file is larger than the 50 MB limit.",
+      "The file is larger than the 300 MB limit.",
       "Please split the workbook or remove embedded media and try again.",
     );
   }

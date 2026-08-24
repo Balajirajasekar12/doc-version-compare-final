@@ -21,8 +21,8 @@ export function UploadZone({ onFile, disabled }: Props) {
       setRejected(`${file.name} is not a supported Excel file. Use .xlsx, .xlsm or .xls.`);
       return;
     }
-    if (file.size > 50 * 1024 * 1024) {
-      setRejected(`${file.name} exceeds the 50 MB limit.`);
+    if (file.size > 300 * 1024 * 1024) {
+      setRejected(`${file.name} exceeds the 300 MB limit.`);
       return;
     }
     setRejected(null);
@@ -95,7 +95,7 @@ export function UploadZone({ onFile, disabled }: Props) {
         </div>
         <p className="text-xs font-medium tracking-wide text-muted-foreground/80">
           Supported: <span className="text-foreground/70">.xlsx</span> · <span className="text-foreground/70">.xlsm</span> ·{" "}
-          <span className="text-foreground/70">.xls</span> &nbsp;·&nbsp; up to 50 MB
+          <span className="text-foreground/70">.xls</span> &nbsp;·&nbsp; up to 300 MB
         </p>
       </div>
       {rejected && (

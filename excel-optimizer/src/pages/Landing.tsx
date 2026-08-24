@@ -14,9 +14,6 @@ import {
   Sparkles,
   Wand2,
   Zap,
-  Check,
-  Star,
-  TrendingUp,
 } from "lucide-react";
 import { Link } from "react-router";
 import { Badge } from "@/components/ui/badge";
@@ -24,44 +21,34 @@ import { Button } from "@/components/ui/button";
 import { OptimizerApp } from "@eo/components/optimizer/OptimizerApp";
 
 const fadeUp = {
-  hidden: { opacity: 0, y: 20 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.6, ease: [0.22, 1, 0.36, 1] as const } },
-};
-
-const stagger = {
-  hidden: {},
-  show: { transition: { staggerChildren: 0.08 } },
-};
-
-const item = {
   hidden: { opacity: 0, y: 16 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.5 } },
+  show: { opacity: 1, y: 0, transition: { duration: 0.55, ease: [0.22, 1, 0.36, 1] as const } },
 };
 
 export default function Landing() {
   return (
-    <div className="min-h-screen overflow-x-hidden bg-background text-foreground">
+    <div className="min-h-screen overflow-x-hidden bg-white text-gray-900">
       {/* ------------------------------ Nav ------------------------------ */}
-      <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md">
+      <header className="sticky top-0 z-40 border-b border-gray-200 bg-white/80 backdrop-blur-md">
         <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-5">
           <a href="#top" className="flex items-center gap-2.5">
-            <span className="flex size-8 items-center justify-center rounded-lg bg-brand text-brand-foreground">
+            <span className="flex size-8 items-center justify-center rounded-lg bg-blue-600 text-white">
               <FileSpreadsheet className="size-4.5" strokeWidth={1.9} />
             </span>
-            <span className="text-[15px] font-semibold tracking-tight">Excel Optimizer</span>
+            <span className="text-[15px] font-semibold tracking-tight text-gray-900">Excel Optimizer</span>
           </a>
-          <nav className="hidden items-center gap-7 text-sm text-muted-foreground md:flex">
-            <a href="#how" className="transition-colors hover:text-foreground">How it works</a>
-            <a href="#features" className="transition-colors hover:text-foreground">What is preserved</a>
-            <a href="#privacy" className="transition-colors hover:text-foreground">Privacy</a>
-            <a href="#faq" className="transition-colors hover:text-foreground">FAQ</a>
+          <nav className="hidden items-center gap-7 text-sm text-gray-500 md:flex">
+            <a href="#how" className="transition-colors hover:text-gray-900">How it works</a>
+            <a href="#features" className="transition-colors hover:text-gray-900">What is preserved</a>
+            <a href="#privacy" className="transition-colors hover:text-gray-900">Privacy</a>
+            <a href="#faq" className="transition-colors hover:text-gray-900">FAQ</a>
           </nav>
           <div className="flex items-center gap-3">
-            <Badge variant="secondary" className="gap-1.5 border-border/70 px-3 py-1 text-[11px] font-medium">
-              <ShieldCheck className="size-3.5 text-brand" />
+            <Badge variant="secondary" className="gap-1.5 border-gray-200 bg-blue-50 px-3 py-1 text-[11px] font-medium text-blue-700">
+              <ShieldCheck className="size-3.5 text-blue-600" />
               100% private · in-browser
             </Badge>
-            <Button asChild variant="outline" size="sm" className="cursor-pointer">
+            <Button asChild variant="outline" size="sm" className="cursor-pointer border-blue-200 text-blue-700 hover:bg-blue-50">
               <Link to="/dashboard">Open optimizer</Link>
             </Button>
           </div>
@@ -73,15 +60,14 @@ export default function Landing() {
         <section className="relative">
           {/* Ambient background */}
           <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
-            <div className="absolute -top-32 left-1/2 h-[500px] w-[800px] -translate-x-1/2 rounded-full bg-brand/[0.08] blur-3xl" />
-            <div className="absolute top-20 -right-40 h-80 w-80 rounded-full bg-brand/[0.06] blur-3xl" />
-            <div className="absolute top-40 -left-40 h-80 w-80 rounded-full bg-brand/[0.04] blur-3xl" />
-            <div className="absolute bottom-0 left-1/2 h-60 w-[600px] -translate-x-1/2 rounded-full bg-gradient-to-t from-brand/[0.03] to-transparent blur-2xl" />
+            <div className="absolute -top-32 left-1/2 h-[420px] w-[720px] -translate-x-1/2 rounded-full bg-blue-100/60 blur-3xl" />
+            <div className="absolute top-40 -right-40 h-72 w-72 rounded-full bg-blue-50/80 blur-3xl" />
+            <div className="absolute top-64 -left-40 h-72 w-72 rounded-full bg-blue-50/60 blur-3xl" />
           </div>
 
-          <div className="relative mx-auto w-full max-w-3xl px-5 pb-20 pt-16 text-center sm:pt-24">
+          <div className="relative mx-auto w-full max-w-3xl px-5 pb-20 pt-16 text-center sm:pt-20">
             <motion.div initial="hidden" animate="show" variants={fadeUp}>
-              <Badge variant="outline" className="mb-6 gap-2 rounded-full border-brand/30 bg-brand/5 px-4 py-1.5 text-xs font-medium text-brand">
+              <Badge variant="outline" className="mb-6 gap-2 rounded-full border-blue-200 bg-blue-50 px-3.5 py-1.5 text-xs font-medium text-blue-700">
                 <Zap className="size-3.5" />
                 Zero-cost · open source · runs entirely in your browser
               </Badge>
@@ -91,67 +77,45 @@ export default function Landing() {
               initial="hidden"
               animate="show"
               variants={fadeUp}
-              className="text-balance text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl lg:text-6xl"
+              className="text-balance text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl"
             >
-              Make your Excel files{" "}
-              <span className="bg-gradient-to-r from-brand via-brand/80 to-brand bg-clip-text text-transparent">
-                clean, consistent and professional
-              </span>{" "}
-              — without touching your data.
+              Make your Excel files clean, consistent and professional —{" "}
+              <span className="text-blue-600">without touching your data.</span>
             </motion.h1>
 
             <motion.p
               initial="hidden"
               animate="show"
               variants={fadeUp}
-              className="mx-auto mt-6 max-w-xl text-pretty text-base leading-relaxed text-muted-foreground sm:text-lg"
+              className="mx-auto mt-5 max-w-xl text-pretty text-base leading-relaxed text-gray-500 sm:text-lg"
             >
               Upload a workbook and the optimizer detects titles, tables, totals and number columns — then applies a
               consistent corporate style. Formulas, values, charts, pivot tables, merges and macros are preserved exactly.
             </motion.p>
 
-            {/* Trust indicators */}
-            <motion.div
-              initial="hidden"
-              animate="show"
-              variants={stagger}
-              className="mx-auto mt-6 flex flex-wrap items-center justify-center gap-3"
-            >
-              {[
-                { icon: ShieldCheck, text: "100% Private" },
-                { icon: Sigma, text: "Formulas Preserved" },
-                { icon: Zap, text: "Instant Results" },
-              ].map((t) => (
-                <motion.div key={t.text} variants={item} className="flex items-center gap-1.5 rounded-full border border-border/50 bg-card/60 px-3 py-1.5 text-xs font-medium text-muted-foreground">
-                  <t.icon className="size-3.5 text-brand" />
-                  {t.text}
-                </motion.div>
-              ))}
-            </motion.div>
-
             {/* The tool */}
             <motion.div
               initial={{ opacity: 0, y: 24 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.6, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
+              transition={{ duration: 0.6, delay: 0.15, ease: [0.22, 1, 0.36, 1] }}
               className="mt-10 text-left"
             >
-              <div className="rounded-3xl border border-border/70 bg-card/70 p-2 shadow-xl shadow-black/[0.04] backdrop-blur">
-                <div className="rounded-[20px] border border-border/50 bg-card px-5 py-8 sm:px-8">
+              <div className="rounded-3xl border border-gray-200 bg-white p-2 shadow-xl shadow-black/[0.04] backdrop-blur">
+                <div className="rounded-[20px] border border-gray-100 bg-gray-50/50 px-5 py-8 sm:px-8">
                   <OptimizerApp />
                 </div>
               </div>
-              <p className="mt-4 text-center text-xs text-muted-foreground">
-                Supported: <span className="font-medium text-foreground/80">.xlsx</span> ·{" "}
-                <span className="font-medium text-foreground/80">.xlsm</span> (macros preserved) ·{" "}
-                <span className="font-medium text-foreground/80">.xls</span> (converted to modern format) — up to 50 MB
+              <p className="mt-4 text-center text-xs text-gray-500">
+                Supported: <span className="font-medium text-gray-700">.xlsx</span> ·{" "}
+                <span className="font-medium text-gray-700">.xlsm</span> (macros preserved) ·{" "}
+                <span className="font-medium text-gray-700">.xls</span> (converted to modern format) — up to 300 MB
               </p>
               <p className="mt-3 text-center text-xs">
                 <Link
                   to="/dashboard"
-                  className="font-medium text-brand underline-offset-2 hover:underline"
+                  className="font-medium text-blue-600 underline-offset-2 hover:underline"
                 >
-                  Open the full workspace with run history →
+                  Open the full workspace with run history
                 </Link>
               </p>
             </motion.div>
@@ -159,135 +123,29 @@ export default function Landing() {
         </section>
 
         {/* --------------------------- Trust strip -------------------------- */}
-        <section className="border-y border-border/60 bg-muted/30">
-          <div className="mx-auto grid w-full max-w-5xl grid-cols-2 gap-x-6 gap-y-8 px-5 py-12 sm:grid-cols-4">
+        <section className="border-y border-gray-200 bg-gray-50/60">
+          <div className="mx-auto grid w-full max-w-5xl grid-cols-2 gap-x-6 gap-y-8 px-5 py-10 sm:grid-cols-4">
             {[
               { icon: Lock, title: "Nothing uploaded", text: "All processing happens in your browser" },
               { icon: Sigma, title: "Formulas preserved", text: "Validated before and after, zero changes" },
               { icon: Wand2, title: "Formatting only", text: "Presentation is optimized, content is never edited" },
               { icon: Zap, title: "Free forever", text: "Open source libraries, no API keys, no servers" },
-            ].map((f, i) => (
-              <motion.div
-                key={f.title}
-                initial={{ opacity: 0, y: 12 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, margin: "-40px" }}
-                transition={{ duration: 0.4, delay: i * 0.05 }}
-                className="flex flex-col items-center gap-2.5 text-center"
-              >
-                <span className="flex size-11 items-center justify-center rounded-xl border border-border/70 bg-card text-brand">
+            ].map((f) => (
+              <motion.div key={f.title} initial={{ opacity: 0, y: 10 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true, margin: "-40px" }} transition={{ duration: 0.4 }} className="flex flex-col items-center gap-2.5 text-center">
+                <span className="flex size-10 items-center justify-center rounded-xl border border-gray-200 bg-white text-blue-600">
                   <f.icon className="size-5" strokeWidth={1.7} />
                 </span>
-                <p className="text-sm font-semibold">{f.title}</p>
-                <p className="max-w-[190px] text-xs leading-relaxed text-muted-foreground">{f.text}</p>
+                <p className="text-sm font-semibold text-gray-900">{f.title}</p>
+                <p className="max-w-[190px] text-xs leading-relaxed text-gray-500">{f.text}</p>
               </motion.div>
             ))}
-          </div>
-        </section>
-
-        {/* --------------------------- Before / After ------------------------- */}
-        <section className="mx-auto w-full max-w-5xl px-5 py-20">
-          <motion.div initial="hidden" whileInView="show" viewport={{ once: true, margin: "-80px" }} variants={fadeUp} className="text-center">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">See the difference</p>
-            <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">Before & After</h2>
-            <p className="mx-auto mt-4 max-w-lg text-sm text-muted-foreground">
-              The optimizer transforms messy spreadsheets into polished, professional documents — while preserving every formula and value.
-            </p>
-          </motion.div>
-
-          <div className="mt-12 grid grid-cols-1 gap-6 md:grid-cols-2">
-            {/* Before */}
-            <motion.div
-              initial={{ opacity: 0, x: -20 }}
-              whileInView={{ opacity: 1, x: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5 }}
-              className="rounded-2xl border border-red-200/40 bg-red-50/30 p-6 dark:border-red-500/10 dark:bg-red-500/5"
-            >
-              <div className="flex items-center gap-2 mb-4">
-                <span className="rounded-full bg-red-100 px-2.5 py-0.5 text-[10px] font-semibold text-red-700 dark:bg-red-500/15 dark:text-red-300">BEFORE</span>
-                <span className="text-xs text-muted-foreground">Unformatted workbook</span>
-              </div>
-              <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-                <div className="h-3 w-24 rounded bg-muted" />
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className="h-8 rounded bg-muted/60" />
-                  ))}
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className="h-6 rounded bg-muted/40" />
-                  ))}
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className="h-6 rounded bg-muted/40" />
-                  ))}
-                </div>
-                <div className="h-px bg-border/50" />
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className="h-6 rounded bg-muted/30" />
-                  ))}
-                </div>
-              </div>
-              <ul className="mt-4 space-y-1.5 text-xs text-muted-foreground">
-                <li className="flex items-center gap-1.5"><span className="size-1 rounded-full bg-red-400" /> Inconsistent fonts and sizes</li>
-                <li className="flex items-center gap-1.5"><span className="size-1 rounded-full bg-red-400" /> No borders or alignment</li>
-                <li className="flex items-center gap-1.5"><span className="size-1 rounded-full bg-red-400" /> Numbers not formatted</li>
-              </ul>
-            </motion.div>
-
-            {/* After */}
-            <motion.div
-              initial={{ opacity: 0, x: 20 }}
-              whileInView={{ opacity: 1, x: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.5, delay: 0.1 }}
-              className="rounded-2xl border border-emerald-200/40 bg-emerald-50/30 p-6 dark:border-emerald-500/10 dark:bg-emerald-500/5"
-            >
-              <div className="flex items-center gap-2 mb-4">
-                <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">AFTER</span>
-                <span className="text-xs text-muted-foreground">Optimized workbook</span>
-              </div>
-              <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-                <div className="h-3 w-28 rounded bg-brand/20" />
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className="h-8 rounded-md bg-brand/10 border border-brand/20" />
-                  ))}
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className={`h-6 rounded ${i % 2 === 0 ? 'bg-brand/5' : 'bg-transparent'} border border-brand/10`} />
-                  ))}
-                </div>
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className={`h-6 rounded ${i % 2 === 0 ? 'bg-brand/5' : 'bg-transparent'} border border-brand/10`} />
-                  ))}
-                </div>
-                <div className="h-px bg-brand/20" />
-                <div className="grid grid-cols-4 gap-2">
-                  {[1,2,3,4].map(i => (
-                    <div key={i} className="h-6 rounded bg-brand/10 border border-brand/20 font-medium" />
-                  ))}
-                </div>
-              </div>
-              <ul className="mt-4 space-y-1.5 text-xs text-muted-foreground">
-                <li className="flex items-center gap-1.5"><span className="size-1 rounded-full bg-emerald-400" /> Consistent fonts and sizing</li>
-                <li className="flex items-center gap-1.5"><span className="size-1 rounded-full bg-emerald-400" /> Professional borders and alignment</li>
-                <li className="flex items-center gap-1.5"><span className="size-1 rounded-full bg-emerald-400" /> Number columns formatted with commas</li>
-              </ul>
-            </motion.div>
           </div>
         </section>
 
         {/* --------------------------- How it works ------------------------- */}
         <section id="how" className="mx-auto w-full max-w-5xl scroll-mt-20 px-5 py-20">
           <motion.div initial="hidden" whileInView="show" viewport={{ once: true, margin: "-80px" }} variants={fadeUp} className="text-center">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">How it works</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-600">How it works</p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">Three steps to a professional workbook</h2>
           </motion.div>
 
@@ -318,51 +176,26 @@ export default function Landing() {
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: "-60px" }}
                 transition={{ duration: 0.5, delay: i * 0.1 }}
-                className="group relative rounded-2xl border border-border/70 bg-card/60 p-6 transition-shadow hover:shadow-lg hover:shadow-black/[0.04]"
+                className="group relative rounded-2xl border border-gray-200 bg-white p-6 transition-shadow hover:shadow-lg hover:shadow-black/[0.04]"
               >
-                <span className="absolute right-5 top-4 text-4xl font-bold text-border/70 transition-colors group-hover:text-brand/20">{s.step}</span>
-                <div className="flex size-11 items-center justify-center rounded-xl bg-brand/10 text-brand">
+                <span className="absolute right-5 top-4 text-4xl font-bold text-gray-200 transition-colors group-hover:text-blue-100">{s.step}</span>
+                <div className="flex size-11 items-center justify-center rounded-xl bg-blue-50 text-blue-600">
                   <s.icon className="size-5.5" strokeWidth={1.7} />
                 </div>
-                <h3 className="mt-4 text-base font-semibold tracking-tight">{s.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{s.text}</p>
-              </motion.div>
-            ))}
-          </div>
-        </section>
-
-        {/* --------------------------- Stats strip -------------------------- */}
-        <section className="border-y border-border/60 bg-muted/20">
-          <div className="mx-auto grid w-full max-w-5xl grid-cols-2 gap-6 px-5 py-12 sm:grid-cols-4">
-            {[
-              { value: "100%", label: "In-browser processing", icon: Fingerprint },
-              { value: "0", label: "Data uploaded", icon: ShieldCheck },
-              { value: "0", label: "API keys needed", icon: Zap },
-              { value: "∞", label: "Free to use", icon: Sparkles },
-            ].map((s, i) => (
-              <motion.div
-                key={s.label}
-                initial={{ opacity: 0, scale: 0.95 }}
-                whileInView={{ opacity: 1, scale: 1 }}
-                viewport={{ once: true }}
-                transition={{ duration: 0.4, delay: i * 0.05 }}
-                className="flex flex-col items-center gap-2 text-center"
-              >
-                <s.icon className="size-5 text-brand" />
-                <span className="text-2xl font-bold tracking-tight">{s.value}</span>
-                <span className="text-xs text-muted-foreground">{s.label}</span>
+                <h3 className="mt-4 text-base font-semibold tracking-tight text-gray-900">{s.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-gray-500">{s.text}</p>
               </motion.div>
             ))}
           </div>
         </section>
 
         {/* --------------------------- Features ----------------------------- */}
-        <section id="features" className="scroll-mt-20 border-t border-border/60 bg-muted/20">
+        <section id="features" className="scroll-mt-20 border-t border-gray-200 bg-gray-50/40">
           <div className="mx-auto w-full max-w-5xl px-5 py-20">
             <motion.div initial="hidden" whileInView="show" viewport={{ once: true, margin: "-80px" }} variants={fadeUp} className="text-center">
-              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">Preserved, not rewritten</p>
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-600">Preserved, not rewritten</p>
               <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">Everything that matters stays exactly the same</h2>
-              <p className="mx-auto mt-4 max-w-2xl text-pretty text-sm leading-relaxed text-muted-foreground sm:text-base">
+              <p className="mx-auto mt-4 max-w-2xl text-pretty text-sm leading-relaxed text-gray-500 sm:text-base">
                 The optimizer only changes presentation. Before delivering the file, it re-reads the output and validates
                 it against the original — if anything changed unexpectedly, no file is produced.
               </p>
@@ -383,15 +216,15 @@ export default function Landing() {
                   whileInView={{ opacity: 1, y: 0 }}
                   viewport={{ once: true, margin: "-40px" }}
                   transition={{ duration: 0.45, delay: (i % 3) * 0.08 }}
-                  className="rounded-2xl border border-border/70 bg-card/60 p-5"
+                  className="rounded-2xl border border-gray-200 bg-white p-5"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500">
                       <f.icon className="size-4.5" strokeWidth={1.7} />
                     </span>
-                    <h3 className="text-sm font-semibold tracking-tight">{f.title}</h3>
+                    <h3 className="text-sm font-semibold tracking-tight text-gray-900">{f.title}</h3>
                   </div>
-                  <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{f.text}</p>
+                  <p className="mt-3 text-sm leading-relaxed text-gray-500">{f.text}</p>
                 </motion.div>
               ))}
             </div>
@@ -405,14 +238,14 @@ export default function Landing() {
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true, margin: "-80px" }}
             transition={{ duration: 0.5 }}
-            className="relative overflow-hidden rounded-3xl border border-brand/20 bg-gradient-to-br from-brand/[0.07] via-card to-card p-8 sm:p-12"
+            className="relative overflow-hidden rounded-3xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-white p-8 sm:p-12"
           >
-            <div aria-hidden className="pointer-events-none absolute -right-24 -top-24 size-64 rounded-full bg-brand/10 blur-3xl" />
+            <div aria-hidden className="pointer-events-none absolute -right-24 -top-24 size-64 rounded-full bg-blue-100/60 blur-3xl" />
             <div className="relative grid grid-cols-1 gap-10 md:grid-cols-2 md:items-center">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">Privacy & security</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-600">Privacy & security</p>
                 <h2 className="mt-3 text-2xl font-bold tracking-tight sm:text-3xl">Your data never leaves your device</h2>
-                <p className="mt-4 text-sm leading-relaxed text-muted-foreground sm:text-base">
+                <p className="mt-4 text-sm leading-relaxed text-gray-500 sm:text-base">
                   Your Excel file is processed securely in your browser. Temporary in-memory copies are discarded as soon
                   as the session ends, nothing is stored, and no workbook content is ever sent to any server.
                 </p>
@@ -424,8 +257,8 @@ export default function Landing() {
                   { icon: ShieldCheck, text: "Uploaded filenames are never trusted; format is verified from file contents" },
                   { icon: Sparkles, text: "No AI services, no API keys, no accounts — free and deterministic" },
                 ].map((item) => (
-                  <li key={item.text} className="flex items-start gap-3 text-sm leading-relaxed text-foreground/85">
-                    <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-card text-brand">
+                  <li key={item.text} className="flex items-start gap-3 text-sm leading-relaxed text-gray-700">
+                    <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-blue-600">
                       <item.icon className="size-4" strokeWidth={1.7} />
                     </span>
                     {item.text}
@@ -439,7 +272,7 @@ export default function Landing() {
         {/* ------------------------------ FAQ ------------------------------- */}
         <section id="faq" className="mx-auto w-full max-w-3xl scroll-mt-20 px-5 pb-24">
           <motion.div initial="hidden" whileInView="show" viewport={{ once: true, margin: "-60px" }} variants={fadeUp} className="text-center">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-brand">FAQ</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-600">FAQ</p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight">Good questions</h2>
           </motion.div>
           <div className="mt-10 space-y-3">
@@ -465,12 +298,12 @@ export default function Landing() {
                 a: "None. The app runs on open-source libraries entirely in your browser — no sign-up, no API keys, no servers.",
               },
             ].map((item) => (
-              <details key={item.q} className="group rounded-2xl border border-border/70 bg-card/60 px-6 py-4 open:shadow-sm">
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-sm font-semibold tracking-tight [&::-webkit-details-marker]:hidden">
+              <details key={item.q} className="group rounded-2xl border border-gray-200 bg-white px-6 py-4 open:shadow-sm">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-sm font-semibold tracking-tight text-gray-900 [&::-webkit-details-marker]:hidden">
                   {item.q}
-                  <ArrowDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                  <ArrowDown className="size-4 shrink-0 text-gray-400 transition-transform group-open:rotate-180" />
                 </summary>
-                <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{item.a}</p>
+                <p className="mt-3 text-sm leading-relaxed text-gray-500">{item.a}</p>
               </details>
             ))}
           </div>
@@ -478,16 +311,16 @@ export default function Landing() {
       </main>
 
       {/* ------------------------------ Footer ------------------------------ */}
-      <footer className="border-t border-border/60 bg-muted/20">
-        <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-4 px-5 py-8 text-sm text-muted-foreground sm:flex-row">
+      <footer className="border-t border-gray-200 bg-gray-50/60">
+        <div className="mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-4 px-5 py-8 text-sm text-gray-500 sm:flex-row">
           <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-md bg-brand text-brand-foreground">
+            <span className="flex size-6 items-center justify-center rounded-md bg-blue-600 text-white">
               <FileSpreadsheet className="size-3.5" strokeWidth={1.9} />
             </span>
-            <span className="font-medium text-foreground">Excel Optimizer</span>
+            <span className="font-medium text-gray-900">Excel Optimizer</span>
           </div>
           <p className="flex items-center gap-1.5 text-xs">
-            <ShieldCheck className="size-3.5 text-brand" />
+            <ShieldCheck className="size-3.5 text-blue-600" />
             Clean · Format · Standardize · Preserve — free, private, in your browser
           </p>
         </div>
