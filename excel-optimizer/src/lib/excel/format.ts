@@ -282,13 +282,13 @@ export function formatSheet(
   // "test automation execution dashboard 5" → "Project 11 Testing Summary").
   // Only cells the detector classified as headings are touched — data cells
   // are never modified — and only when the text actually changes.
-  if (settings.titleCase) {
+  if (settings.titleCase || settings.correctTypos) {
     const seen = new Set<string>();
     const tryCase = (cell: CellData) => {
       const key = `${cell.row}:${cell.col}`;
       if (seen.has(key)) return;
       seen.add(key);
-      if (applyTitleCase(sheet, cell)) {
+      if (applyTitleCase(sheet, cell, settings) ) {
         counters.headingsTitleCased++;
         dirty = true;
       }
@@ -314,13 +314,16 @@ export function formatSheet(
 }
 
 /** Rewrites a heading cell's text to title case (with typo corrections). Returns true when changed. */
-function applyTitleCase(sheet: ParsedSheet, cell: CellData): boolean {
+function applyTitleCase(sheet: ParsedSheet, cell: CellData, settings: OptimizerSettings): boolean {
   if (cell.kind !== "string" || cell.hasFormula) return false;
   const text = cell.text ?? "";
   if (!text) return false;
   // Apply typo/spelling corrections first, then title case
-  const corrected = correctTypos(text);
+  const corrected = settings.correctTypos ? correctTypos(text) : text;
   const cased = toTitleCase(corrected);
+  if (corrected !== text) {
+    console.log("[EO-FORMAT] correcting:", JSON.stringify(text), "->", JSON.stringify(corrected), "->", JSON.stringify(cased));
+  }
   if (cased === text) return false;
   if (setCellText(sheet, cell.row, cell.col, cased)) {
     sheet.casedRefs.add(cell.ref);

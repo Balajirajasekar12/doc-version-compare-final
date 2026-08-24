@@ -133,6 +133,8 @@ export interface OptimizerSettings {
   headerStyle: HeaderStyle;
   /** Title-case detected titles, subtitles, sections and table headers. */
   titleCase: boolean;
+  /** Correct common spelling mistakes in headings (e.g., "Sfb" → "SFB"). */
+  correctTypos: boolean;
   // Tables
   borders: TriState;
   alternatingRows: TriState;
@@ -160,6 +162,7 @@ export const DEFAULT_SETTINGS: OptimizerSettings = {
   bodyFontSize: 10,
   headerStyle: "professional",
   titleCase: true,
+  correctTypos: true,
   borders: "automatic",
   alternatingRows: "automatic",
   alignment: "automatic",
