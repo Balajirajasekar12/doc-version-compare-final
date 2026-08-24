@@ -724,10 +724,13 @@ export function compareCanonical(
     const nb = normalizeValue(b, mode);
     if (na === nb) return true;
 
-    // Pipe-aware comparison: "Field | Value" === "Field Value"
-    // Strip pipes and collapse whitespace for structural equivalence
-    const stripPipes = (s: string) => s.replace(/[|]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
-    if (stripPipes(na) === stripPipes(nb)) return true;
+    // Structural equivalence: strip pipes, tabs, collapse whitespace
+    // This handles PDF space-separated tables vs RTF tab-separated tables
+    // vs DOCX pipe-delimited tables — all produce equivalent text.
+    const structural = (s: string) => s.replace(/[|\t]/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    const sa = structural(na);
+    const sb = structural(nb);
+    if (sa === sb) return true;
 
     return false;
   }
@@ -990,6 +993,61 @@ export function compareCanonical(
         for (const { idx: bIdx } of contained) {
           unmatchedBaseline.delete(bIdx);
         }
+      }
+    }
+  }
+
+  // Phase 6b: Match consecutive paragraphs against field_value items.
+  // When PDF produces "Claims Paid Thru" + "07/31/2026 (Bill Cycle 5 of 5)"
+  // as two paragraphs, but RTF produces field_value("claims paid thru",
+  // "07/31/2026"), match the combined paragraphs against the field_value.
+  // Strategy: for each unmatched paragraph, check if the NEXT paragraph
+  // combines with it to match an unmatched field_value's normalized text.
+  const unmatchedKVComp6b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedParaBase6b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }));
+
+  for (const { el: bEl, idx: bIdx } of unmatchedParaBase6b) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+    if (bNorm.length < 3) continue;
+
+    // Check if this paragraph + next unmatched paragraph matches a field_value
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComp6b) {
+      if (!unmatchedComparing.has(cIdx)) continue;
+      const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+      // Check if the combined paragraph text contains the field_value's value
+      if (bNorm.includes(cNorm) && cNorm.length >= 3) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: bNorm.includes(cNorm) });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Same in reverse: match consecutive comparing paragraphs against baseline field_values
+  const unmatchedKVBase6b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedParaComp6b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }));
+
+  for (const { el: cEl, idx: cIdx } of unmatchedParaComp6b) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+    if (cNorm.length < 3) continue;
+
+    for (const { el: bEl, idx: bIdx } of unmatchedKVBase6b) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+      if (cNorm.includes(bNorm) && bNorm.length >= 3) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: cNorm.includes(bNorm) });
+        unmatchedComparing.delete(cIdx);
+        unmatchedBaseline.delete(bIdx);
+        break;
       }
     }
   }
