@@ -711,115 +711,141 @@ function updateAnchorsString(
   // Helper to build a tag name with the detected prefix.
   const tag = (name: string) => pfx ? `${pfx}${name}` : name;
 
+  // ── Phase 1: Collect ALL anchor blocks and their embed IDs ──
+  // We do this on the ORIGINAL string (no modifications yet) so all
+  // indices are stable.
+  interface AnchorBlock {
+    open: number;       // absolute start in originalXml
+    close: number;      // absolute end (exclusive) in originalXml
+    embedId: string;
+    isTwoCell: boolean;
+  }
+  const blocks: AnchorBlock[] = [];
+  {
+    const twoTag = `<${tag("twoCellAnchor")}`;
+    const oneTag = `<${tag("oneCellAnchor")}`;
+    const twoClose = `</${tag("twoCellAnchor")}>`;
+    const oneClose = `</${tag("oneCellAnchor")}>`;
+    let pos = 0;
+    while (pos < originalXml.length) {
+      const twoIdx = originalXml.indexOf(twoTag, pos);
+      const oneIdx = originalXml.indexOf(oneTag, pos);
+      let anchorOpen = -1;
+      let closeTag = "";
+      let isTwoCell = false;
+      if (twoIdx >= 0 && (oneIdx < 0 || twoIdx < oneIdx)) {
+        anchorOpen = twoIdx; closeTag = twoClose; isTwoCell = true;
+      } else if (oneIdx >= 0) {
+        anchorOpen = oneIdx; closeTag = oneClose; isTwoCell = false;
+      }
+      if (anchorOpen === -1) break;
+
+      const anchorClose = originalXml.indexOf(closeTag, anchorOpen);
+      if (anchorClose === -1) break;
+
+      // Find embed ID within this anchor block.
+      const blockStr = originalXml.substring(anchorOpen, anchorClose + closeTag.length);
+      const embedMatch = blockStr.match(/r:embed="([^"]+)"/);
+      if (embedMatch && embedIdToNewRows.has(embedMatch[1])) {
+        blocks.push({
+          open: anchorOpen,
+          close: anchorClose + closeTag.length,
+          embedId: embedMatch[1],
+          isTwoCell,
+        });
+      }
+      pos = anchorClose + closeTag.length;
+    }
+  }
+
+  if (blocks.length === 0) return originalXml;
+
+  // ── Phase 2: Process blocks from bottom to top ──
+  // By processing highest-index blocks first, earlier indices remain valid.
   let result = originalXml;
   let anchorsUpdated = 0;
 
-  // For each embed ID that needs updating, find and modify all matching anchors.
-  for (const [embedId, newRows] of embedIdToNewRows) {
-    // Find ALL anchor blocks containing this embed ID.
-    let safety = 0;
-    while (safety < 100) {
-      safety++;
-      const embedIdx = result.indexOf(`r:embed="${embedId}"`);
-      if (embedIdx === -1) break;
+  // Sort blocks by open position descending (bottom to top).
+  blocks.sort((a, b) => b.open - a.open);
 
-      // Find anchor opening tag (search backward from embed position).
-      const beforeEmbed = result.substring(0, embedIdx);
-      const twoAnchorOpen = beforeEmbed.lastIndexOf(`<${tag("twoCellAnchor")}`);
-      const oneAnchorOpen = beforeEmbed.lastIndexOf(`<${tag("oneCellAnchor")}`);
-      const anchorOpen = Math.max(twoAnchorOpen, oneAnchorOpen);
-      if (anchorOpen === -1) break;
+  for (const block of blocks) {
+    const newRows = embedIdToNewRows.get(block.embedId);
+    if (!newRows) continue;
 
-      // Find anchor closing tag.
-      const isTwoCell = twoAnchorOpen > oneAnchorOpen;
-      const closeTag = isTwoCell ? `</${tag("twoCellAnchor")}>` : `</${tag("oneCellAnchor")}>`;
-      const anchorClose = result.indexOf(closeTag, anchorOpen);
-      if (anchorClose === -1) break;
+    const anchorBlock = result.substring(block.open, block.close);
 
-      const anchorBlock = result.substring(anchorOpen, anchorClose + closeTag.length);
+    // Update <from> block.
+    const fromOpenTag = `<${tag("from")}>`;
+    const fromCloseTag = `</${tag("from")}>`;
+    const fromOpen = anchorBlock.indexOf(fromOpenTag);
+    const fromClose = anchorBlock.indexOf(fromCloseTag, fromOpen);
+    let updatedBlock = anchorBlock;
 
-      // Extract and update the <from> block.
-      const fromOpenTag = `<${tag("from")}>`;
-      const fromCloseTag = `</${tag("from")}>`;
-      const fromOpen = anchorBlock.indexOf(fromOpenTag);
-      const fromClose = anchorBlock.indexOf(fromCloseTag, fromOpen);
-      if (fromOpen !== -1 && fromClose !== -1) {
-        const fromBlock = anchorBlock.substring(fromOpen, fromClose + fromCloseTag.length);
-        // Replace <row>/<rowOff> values within this specific <from> block only.
+    if (fromOpen !== -1 && fromClose !== -1) {
+      const fromBlock = anchorBlock.substring(fromOpen, fromClose + fromCloseTag.length);
+      let updatedFrom = fromBlock;
+      const rowOpen = `<${tag("row")}>`;
+      const rowClose = `</${tag("row")}>`;
+      const rowOffOpen = `<${tag("rowOff")}>`;
+      const rowOffClose = `</${tag("rowOff")}>`;
+
+      const rowIdx = updatedFrom.indexOf(rowOpen);
+      if (rowIdx !== -1) {
+        const rowEnd = updatedFrom.indexOf(rowClose, rowIdx);
+        if (rowEnd !== -1) {
+          updatedFrom = updatedFrom.substring(0, rowIdx + rowOpen.length) +
+            String(newRows.fromRow) + updatedFrom.substring(rowEnd);
+        }
+      }
+      const rowOffIdx = updatedFrom.indexOf(rowOffOpen);
+      if (rowOffIdx !== -1) {
+        const rowOffEnd = updatedFrom.indexOf(rowOffClose, rowOffIdx);
+        if (rowOffEnd !== -1) {
+          updatedFrom = updatedFrom.substring(0, rowOffIdx + rowOffOpen.length) +
+            String(newRows.fromRowOff) + updatedFrom.substring(rowOffEnd);
+        }
+      }
+      updatedBlock = anchorBlock.substring(0, fromOpen) +
+        updatedFrom + anchorBlock.substring(fromClose + fromCloseTag.length);
+    }
+
+    // Update <to> block (only for twoCellAnchor).
+    if (block.isTwoCell) {
+      const toOpenTag = `<${tag("to")}>`;
+      const toCloseTag = `</${tag("to")}>`;
+      const toOpen = updatedBlock.indexOf(toOpenTag);
+      const toClose = updatedBlock.indexOf(toCloseTag, toOpen);
+      if (toOpen !== -1 && toClose !== -1) {
+        const toBlock = updatedBlock.substring(toOpen, toClose + toCloseTag.length);
+        let updatedTo = toBlock;
         const rowOpen = `<${tag("row")}>`;
         const rowClose = `</${tag("row")}>`;
         const rowOffOpen = `<${tag("rowOff")}>`;
         const rowOffClose = `</${tag("rowOff")}>`;
-        let updatedFromBlock = fromBlock;
-        const rowIdx = updatedFromBlock.indexOf(rowOpen);
+        const rowIdx = updatedTo.indexOf(rowOpen);
         if (rowIdx !== -1) {
-          const rowEnd = updatedFromBlock.indexOf(rowClose, rowIdx);
+          const rowEnd = updatedTo.indexOf(rowClose, rowIdx);
           if (rowEnd !== -1) {
-            updatedFromBlock = updatedFromBlock.substring(0, rowIdx + rowOpen.length) +
-              String(newRows.fromRow) +
-              updatedFromBlock.substring(rowEnd);
+            updatedTo = updatedTo.substring(0, rowIdx + rowOpen.length) +
+              String(newRows.toRow) + updatedTo.substring(rowEnd);
           }
         }
-        const rowOffIdx = updatedFromBlock.indexOf(rowOffOpen);
+        const rowOffIdx = updatedTo.indexOf(rowOffOpen);
         if (rowOffIdx !== -1) {
-          const rowOffEnd = updatedFromBlock.indexOf(rowOffClose, rowOffIdx);
+          const rowOffEnd = updatedTo.indexOf(rowOffClose, rowOffIdx);
           if (rowOffEnd !== -1) {
-            updatedFromBlock = updatedFromBlock.substring(0, rowOffIdx + rowOffOpen.length) +
-              String(newRows.fromRowOff) +
-              updatedFromBlock.substring(rowOffEnd);
+            updatedTo = updatedTo.substring(0, rowOffIdx + rowOffOpen.length) +
+              String(newRows.toRowOff) + updatedTo.substring(rowOffEnd);
           }
         }
-        result =
-          result.substring(0, anchorOpen) +
-          anchorBlock.substring(0, fromOpen) +
-          updatedFromBlock +
-          anchorBlock.substring(fromClose + fromCloseTag.length) +
-          result.substring(anchorClose + closeTag.length);
-        anchorsUpdated++;
-      }
-
-      // Extract and update the <to> block (only for twoCellAnchor).
-      if (isTwoCell) {
-        // Re-extract anchorBlock since result may have changed.
-        const updatedAnchorBlock = result.substring(anchorOpen, anchorClose + closeTag.length);
-        const toOpenTag = `<${tag("to")}>`;
-        const toCloseTag = `</${tag("to")}>`;
-        const toOpen = updatedAnchorBlock.indexOf(toOpenTag);
-        const toClose = updatedAnchorBlock.indexOf(toCloseTag, toOpen);
-        if (toOpen !== -1 && toClose !== -1) {
-          const toBlock = updatedAnchorBlock.substring(toOpen, toClose + toCloseTag.length);
-          let updatedToBlock = toBlock;
-          const rowOpen = `<${tag("row")}>`;
-          const rowClose = `</${tag("row")}>`;
-          const rowOffOpen = `<${tag("rowOff")}>`;
-          const rowOffClose = `</${tag("rowOff")}>`;
-          const rowIdx = updatedToBlock.indexOf(rowOpen);
-          if (rowIdx !== -1) {
-            const rowEnd = updatedToBlock.indexOf(rowClose, rowIdx);
-            if (rowEnd !== -1) {
-              updatedToBlock = updatedToBlock.substring(0, rowIdx + rowOpen.length) +
-                String(newRows.toRow) +
-                updatedToBlock.substring(rowEnd);
-            }
-          }
-          const rowOffIdx = updatedToBlock.indexOf(rowOffOpen);
-          if (rowOffIdx !== -1) {
-            const rowOffEnd = updatedToBlock.indexOf(rowOffClose, rowOffIdx);
-            if (rowOffEnd !== -1) {
-              updatedToBlock = updatedToBlock.substring(0, rowOffIdx + rowOffOpen.length) +
-                String(newRows.toRowOff) +
-                updatedToBlock.substring(rowOffEnd);
-            }
-          }
-          result =
-            result.substring(0, anchorOpen) +
-            updatedAnchorBlock.substring(0, toOpen) +
-            updatedToBlock +
-            updatedAnchorBlock.substring(toClose + toCloseTag.length) +
-            result.substring(anchorClose + closeTag.length);
-        }
+        updatedBlock = updatedBlock.substring(0, toOpen) +
+          updatedTo + updatedBlock.substring(toClose + toCloseTag.length);
       }
     }
+
+    // Replace this block in the result.
+    result = result.substring(0, block.open) + updatedBlock + result.substring(block.close);
+    anchorsUpdated++;
   }
 
   debugLog.log("DRAWING", `  updateAnchorsString: ${anchorsUpdated} anchor blocks updated (prefix="${pfx || '(none)'}")`);
@@ -849,21 +875,28 @@ class DrawingGeometry {
   parseAnchor(el: XmlEl): AnchorRect | null {
     const from = firstChildElement(el, "from");
     if (!from) return null;
-    const col1 = intOf(firstChildElement(from, "col"));
+    // XML row/col values are 1-based; geometry functions use 0-based
+    // indices internally so that rowStart(0) = 0 and rowStart(N)
+    // equals the EMU position of XML row N+1.
+    const rawCol1 = intOf(firstChildElement(from, "col"));
     const off1 = intOf(firstChildElement(from, "colOff"));
-    const row1 = intOf(firstChildElement(from, "row"));
+    const rawRow1 = intOf(firstChildElement(from, "row"));
     const roff1 = intOf(firstChildElement(from, "rowOff"));
-    if (col1 < 0 || row1 < 0) return null;
+    if (rawCol1 < 0 || rawRow1 < 0) return null;
+    const col1 = rawCol1 - 1;
+    const row1 = rawRow1 - 1;
     const x1 = this.colStart(col1) + off1;
     const y1 = this.rowStart(row1) + roff1;
 
     const to = firstChildElement(el, "to");
     if (to) {
-      const col2 = intOf(firstChildElement(to, "col"));
+      const rawCol2 = intOf(firstChildElement(to, "col"));
       const off2 = intOf(firstChildElement(to, "colOff"));
-      const row2 = intOf(firstChildElement(to, "row"));
+      const rawRow2 = intOf(firstChildElement(to, "row"));
       const roff2 = intOf(firstChildElement(to, "rowOff"));
-      if (col2 < 0 || row2 < 0) return null;
+      if (rawCol2 < 0 || rawRow2 < 0) return null;
+      const col2 = rawCol2 - 1;
+      const row2 = rawRow2 - 1;
       const x2 = this.colStart(col2) + off2;
       const y2 = this.rowStart(row2) + roff2;
       if (x2 <= x1 || y2 <= y1) return null;
@@ -893,7 +926,10 @@ class DrawingGeometry {
 
   /** EMU height of row `row` (0-based). */
   public rowEmu(row: number): number {
-    const rowEl = this.sheet.rowByNum.get(row);
+    // rowByNum uses 1-based keys (from XML <row r="N">), but geometry
+    // iterates with 0-based indices.  Look up r+1 so that internal index 0
+    // maps to XML row 1, internal index 1 to XML row 2, etc.
+    const rowEl = this.sheet.rowByNum.get(row + 1);
     let pt = this.defaultRowHeight;
     if (rowEl) {
       const ht = parseFloat(getAttr(rowEl, "ht") ?? "");
@@ -914,15 +950,16 @@ class DrawingGeometry {
     return acc;
   }
 
-  /** Converts an EMU y position back to (row, rowOff) with rowOff ≥ 0. */
+  /** Converts an EMU y position back to (row, rowOff) with rowOff ≥ 0.
+   *  Returns 1-based row number suitable for writing to OOXML. */
   public yToRow(y: number): { row: number; off: number } {
     let acc = 0;
     for (let r = 0; r < 200_000; r++) {
       const h = this.rowEmu(r);
-      if (y < acc + h) return { row: r, off: y - acc };
+      if (y < acc + h) return { row: r + 1, off: y - acc };
       acc += h;
     }
-    return { row: 0, off: 0 };
+    return { row: 1, off: 0 };
   }
 
   /** Converts EMU (x, y) back to (col, row) for diagnostics. */
