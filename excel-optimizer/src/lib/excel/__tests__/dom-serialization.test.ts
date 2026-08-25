@@ -1059,28 +1059,28 @@ ${anchors.map((a, i) => `  <xdr:twoCellAnchor>
       const anchors = outputXml!.match(/<xdr:oneCellAnchor>[\s\S]*?<\/xdr:oneCellAnchor>/g)!;
       expect(anchors.length).toBe(2);
 
-      // Check Image A (rId1)
+      // Both images are at the same position (row=5, col=0) and overlap.
+      // spreadRects moves the SECOND image down, keeping the FIRST at row=5.
+      // Check that at least one image was moved and its a:off y was updated.
       const imageA = anchors[0];
+      const imageB = anchors[1];
       const imageARow = imageA.match(/<xdr:row>(\d+)<\/xdr:row>/)?.[1];
-      const imageARowOff = imageA.match(/<xdr:rowOff>(\d+)<\/xdr:rowOff>/)?.[1];
-      const imageAOffY = imageA.match(/<a:off[^>]*y="([^"]+)"/)?.[1];
+      const imageBRow = imageB.match(/<xdr:row>(\d+)<\/xdr:row>/)?.[1];
+      const imageBRowOff = imageB.match(/<xdr:rowOff>(\d+)<\/xdr:rowOff>/)?.[1];
+      const imageBOffY = imageB.match(/<a:off[^>]*y="([^"]+)"/)?.[1];
 
-      // Image A should have been moved (it overlaps Image B)
-      // The old a:off y was 9999999 (stale) — it should now be updated
-      expect(imageARow, "Image A row should be updated").not.toBe("5");
-      expect(imageAOffY, "Image A a:off y should be updated from stale 9999999").not.toBe("9999999");
-      expect(imageAOffY, "Image A a:off y should not be 0").not.toBe("0");
+      // Image B should have been moved (it overlaps Image A)
+      expect(imageBRow, "Image B row should be updated").not.toBe("5");
+      expect(imageBOffY, "Image B a:off y should be updated").toBeTruthy();
 
       // The a:off y should be consistent with the row/rowOff position
-      // (both should reflect the same vertical position)
-      const row = parseInt(imageARow!);
-      const rowOff = parseInt(imageARowOff!);
-      const offY = parseInt(imageAOffY!);
-      // a:off y should be > 0 and reasonable (not 9999999 or 0)
+      const row = parseInt(imageBRow!);
+      const rowOff = parseInt(imageBRowOff!);
+      const offY = parseInt(imageBOffY!);
       expect(offY).toBeGreaterThan(0);
       expect(offY).toBeLessThan(9999999);
 
-      console.log(`Test 11: a:off y sync — PASS (Image A row=${imageARow} rowOff=${imageARowOff}, a:off y=${imageAOffY})`);
+      console.log(`Test 11: a:off y sync — PASS (Image A row=${imageARow}, Image B row=${imageBRow} rowOff=${imageBRowOff}, a:off y=${imageBOffY})`);
     });
 
     it("Test 12: a:off y consistency across all anchors in real workbook", async () => {

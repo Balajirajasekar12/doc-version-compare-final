@@ -398,10 +398,10 @@ export async function fixDrawingOverlaps(
     debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} overlapsContent=${ai.overlapsContent} overlapsWith=[${ai.overlapsWith.join(",")}]`);
   }
 
-  // Phase 1: Push images below cell content.
-  // Only push images that ACTUALLY overlap content, not all images.
-  const movedByContent = pushBelowContentSmart(rects, contentBoundaryY, geom);
-  debugLog.log("DRAWING", `  pushBelowContentSmart: moved ${movedByContent} images below content`);
+  // NOTE: pushBelowContentSmart intentionally disabled.
+  // Screenshots may be intentionally positioned over worksheet content.
+  // Only image↔image collisions should be resolved by spreadRects.
+  // Content overlap is not an error — it's a valid layout choice.
 
   // Phase 2: Group nearby images and arrange in grid layout.
   const movedByGrouping = groupAndArrange(rects, contentBoundaryY, geom);
@@ -634,10 +634,11 @@ function groupAndArrange(
     const gridHeight = rows * stdH + (rows - 1) * (GRID_ROW_GAP_PT * 12700);
 
     // Find the best starting Y for this grid.
-    // Start below the lowest image in the group (or content boundary, whichever is lower).
-    let startY = contentBoundaryY;
+    // Start at the current position of the first image in the group.
+    // Do NOT use contentBoundaryY — screenshots may intentionally overlap content.
+    let startY = Infinity;
     for (const r of group) {
-      startY = Math.max(startY, r.newY1 + r.h + SPACING_PX * EMU_PER_PX);
+      startY = Math.min(startY, r.newY1);
     }
 
     // Arrange images in grid.

@@ -500,16 +500,15 @@ describe("EO Image Overlap Repositioning E2E", () => {
       console.log(`  Image ${r.index}: from(${r.fromCol},${r.fromRow}) to(${r.toCol},${r.toRow})`);
     }
 
-    // Images should be moved below content row 10
-    // Content boundary is approximately row 10 (after row 9)
+    // Images that overlap content should STAY at their original positions.
+    // The optimizer only resolves image↔image collisions, not image/content.
     expect(afterRects.length).toBe(beforeRects.length);
-    // Both images should have been moved (their rows changed)
-    for (const r of afterRects) {
-      // The images should be placed below the content boundary
-      // With default row height of 15pt and content ending at row 9,
-      // content boundary is approximately row 10
-      expect(r.fromRow).toBeGreaterThanOrEqual(10);
-    }
+    // Image 1 stays at row 2 (first image, no blocker above)
+    expect(afterRects[0].fromRow).toBe(2);
+    // Image 2 was at row 4 but overlaps Image 1, so spreadRects moves it down
+    // It should be below Image 1 (row 2 + height), NOT below all content (row 10+)
+    expect(afterRects[1].fromRow).toBeGreaterThan(2);
+    expect(afterRects[1].fromRow).toBeLessThan(10); // NOT pushed below content
   });
 
   it("Test 3: Multiple overlapping images are all resolved", async () => {
