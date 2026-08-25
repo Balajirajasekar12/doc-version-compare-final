@@ -412,7 +412,36 @@ export async function fixDrawingOverlaps(
   const movedBySpreading = spreadRects(rects);
   debugLog.log("DRAWING", `  spreadRects: ${movedBySpreading} images spread`);
 
-  // Phase 4: Count final stats.
+  // Phase 4: Verify and iteratively resolve any remaining overlaps.
+  // spreadRects processes images top-to-bottom and only checks against
+  // already-placed images. Pushed images may overlap with images not yet
+  // placed. This phase re-checks ALL pairs and pushes conflicting images
+  // down until no overlaps remain.
+  let safetyIteration = 0;
+  while (safetyIteration < 20) {
+    let foundOverlap = false;
+    // Sort by Y so we process top-to-bottom
+    const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
+    const placed: AnchorRect[] = [];
+    for (const r of ordered) {
+      let y = r.newY1;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const blockers = placed.filter(
+          (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.newY1 < y + r.h && p.newY1 + p.h > y,
+        );
+        if (blockers.length === 0) break;
+        y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
+        foundOverlap = true;
+      }
+      r.newY1 = y;
+      placed.push(r);
+    }
+    if (!foundOverlap) break;
+    safetyIteration++;
+    debugLog.log("DRAWING", `  verification pass ${safetyIteration}: resolved remaining overlaps`);
+  }
+
+  // Phase 5: Count final stats.
   stats.overlapsAfter = countOverlaps(rects);
   stats.contentConflictsAfter = countContentConflicts(rects, contentBoundaryY);
   stats.imagesRepositioned = rects.filter((r) => r.newY1 !== r.y1).length;
