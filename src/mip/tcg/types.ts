@@ -1,5 +1,6 @@
 // ============================================================
-// Requirement → Test Case Generator — Types
+// Requirement → Test Case Generator — Types (Redesigned)
+// Business-flow-first, risk-based, E2E test design engine.
 // ============================================================
 
 // --- Input Document Categories ---
@@ -124,9 +125,36 @@ export interface ExtractedKnowledge {
   sectionRef?: string;
 }
 
+// --- Business Flow (NEW) ---
+export interface BusinessFlow {
+  id: string;
+  name: string;
+  description: string;
+  steps: string[];
+  knowledgeIds: string[]; // knowledge items belonging to this flow
+  upstreamSystems: string[];
+  downstreamSystems: string[];
+  databases: string[];
+  jobs: string[];
+}
+
+// --- Requirement (NEW) ---
+export interface ExtractedRequirement {
+  id: string;
+  text: string;
+  flowId: string | null;
+  sourceRef: string;
+  kind: "functional" | "validation" | "business_rule" | "boundary" | "error_handling" | "database" | "integration" | "ui";
+  sourceKnowledgeId: string; // explicit link to the originating knowledge item
+  relatedTables: string[];   // carried from knowledge for flow grouping
+  relatedFields: string[];   // carried from knowledge for flow grouping
+}
+
 // --- Test Case Generation ---
 export type TestCaseGenType = "Functional" | "Regression" | "Negative" | "Positive";
+export type TestPriority = "P0" | "P1" | "P2" | "P3";
 
+// --- Generated TestCase (redesigned) ---
 export interface GeneratedTestCase {
   id: string;
   caseNumber: string;
@@ -136,16 +164,44 @@ export interface GeneratedTestCase {
   query: string;
   expectedResults: string;
   types: TestCaseGenType[];
+  priority: TestPriority;
+  businessFlow: string;
+  requirementIds: string[];
   sources: TestCaseSource[];
+  riskRationale: string;
   status: "kept" | "ignored" | "edited";
   originalData: Omit<GeneratedTestCase, "status" | "originalData">;
-  editedFields?: Partial<Pick<GeneratedTestCase, "description" | "steps" | "precondition" | "query" | "expectedResults" | "types">>;
+  editedFields?: Partial<Pick<GeneratedTestCase,
+    "description" | "steps" | "precondition" | "query" | "expectedResults" | "types" | "priority" | "businessFlow"
+  >>;
 }
 
 export interface TestCaseSource {
+  documentId: string;
   documentName: string;
   sectionRef: string;
   kind: "requirement" | "design" | "database" | "architecture" | "other";
+}
+
+// --- Generation Summary (NEW) ---
+export interface TcgGenerationSummary {
+  businessFlows: number;
+  requirementsAnalyzed: number;
+  candidateScenarios: number;
+  duplicatesRemoved: number;
+  optimizedScenarios: number;
+  finalTestCases: number;
+  p0Count: number;
+  p1Count: number;
+  p2Count: number;
+  p3Count: number;
+  requirementCoverage: number; // percentage
+  totalRequirements: number;
+  coveredRequirements: number;
+  uncoveredRequirements: string[];
+  dbValidationCases: number;
+  e2eFlows: number;
+  flowNames: string[];
 }
 
 // --- Generation Progress ---
@@ -181,5 +237,9 @@ export interface TcgExportRow {
   query: string;
   expectedResults: string;
   testCaseType: string;
+  priority: string;
+  businessFlow: string;
+  requirementTraceability: string;
   sourceTraceability: string;
+  riskRationale: string;
 }

@@ -412,6 +412,7 @@ export function buildSources(documents: TcgDocument[]): TestCaseSource[] {
   return documents
     .filter(d => d.status === "parsed")
     .map(d => ({
+      documentId: d.id,
       documentName: d.name,
       sectionRef: `${d.category} document`,
       kind: d.category as TestCaseSource["kind"],

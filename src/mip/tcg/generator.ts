@@ -1,6 +1,7 @@
 // ============================================================
-// Requirement → Test Case Generator — Deterministic Generator
-// Generates test cases from extracted knowledge without AI.
+// Requirement → Test Case Generator — Business-Flow-First Engine (v2)
+// Fixed: requirement-knowledge mapping, entity-based flow grouping,
+// meaningful E2E scenario design.
 // ============================================================
 
 import type {
@@ -10,603 +11,1213 @@ import type {
   TestCaseSource,
   TcgDocument,
   SqlParsedContent,
+  BusinessFlow,
+  ExtractedRequirement,
+  TcgGenerationSummary,
+  TestPriority,
 } from "./types";
 
 let tcCounter = 0;
+let reqCounter = 0;
 
-// --- Main entry ---
-export function generateTestCases(
+// ============================================================
+// STAGE 1: DOCUMENT INGESTION — Consolidated understanding
+// ============================================================
+interface ConsolidatedKnowledge {
+  requirements: ExtractedRequirement[];
+  businessRules: string[];
+  validations: string[];
+  flowSteps: string[];
+  dbInteractions: string[];
+  systemInteractions: string[];
+  schemaInfo: { tables: string[]; columns: Map<string, string[]> };
+  errorHandling: string[];
+  boundaryConditions: string[];
+  allKnowledge: ExtractedKnowledge[];
+}
+
+function consolidateKnowledge(
   knowledge: ExtractedKnowledge[],
-  documents: TcgDocument[],
-): GeneratedTestCase[] {
-  tcCounter = 0;
-  const cases: GeneratedTestCase[] = [];
-  const sources = documents
-    .filter(d => d.status === "parsed")
-    .map(d => ({
-      documentName: d.name,
-      sectionRef: `${d.category}`,
-      kind: d.category as TestCaseSource["kind"],
-    }));
+  sources: TestCaseSource[],
+): ConsolidatedKnowledge {
+  const consolidated: ConsolidatedKnowledge = {
+    requirements: [],
+    businessRules: [],
+    validations: [],
+    flowSteps: [],
+    dbInteractions: [],
+    systemInteractions: [],
+    schemaInfo: { tables: [], columns: new Map() },
+    errorHandling: [],
+    boundaryConditions: [],
+    allKnowledge: knowledge,
+  };
 
-  // Get SQL documents for query generation
-  const sqlDocs = documents.filter(d => d.parsedContent?.kind === "sql");
-  const sqlContent = sqlDocs.map(d => d.parsedContent as SqlParsedContent);
+  let reqIdx = 0;
+  for (const k of knowledge) {
+    // Skip section headings — they are context, not testable requirements
+    if (k.text.startsWith("Section:")) continue;
 
-  // Group knowledge by kind for targeted generation
-  const byKind = groupByKind(knowledge);
+    const reqId = `REQ-${String(++reqIdx).padStart(3, "0")}`;
+    const source = sources.find(s => s.documentId === k.documentId) || sources[0];
 
-  // 1. Generate from requirement statements
-  for (const k of byKind.requirement_statement || []) {
-    cases.push(...generateFromRequirement(k, sources));
+    consolidated.requirements.push({
+      id: reqId,
+      text: k.text,
+      flowId: null,
+      sourceRef: source ? `${source.documentName} → ${k.sourceRef}` : k.sourceRef,
+      kind: mapKnowledgeToReqKind(k.kind),
+      sourceKnowledgeId: k.id, // EXPLICIT LINK — never use ID string manipulation
+      relatedTables: [...k.relatedTables],
+      relatedFields: [...k.relatedFields],
+    });
+
+    switch (k.kind) {
+      case "requirement_statement":
+      case "business_rule":
+        consolidated.businessRules.push(k.text);
+        break;
+      case "validation_rule":
+        consolidated.validations.push(k.text);
+        break;
+      case "flow_step":
+        consolidated.flowSteps.push(k.text);
+        break;
+      case "database_interaction":
+        consolidated.dbInteractions.push(k.text);
+        for (const t of k.relatedTables) {
+          if (!consolidated.schemaInfo.tables.includes(t)) {
+            consolidated.schemaInfo.tables.push(t);
+          }
+        }
+        break;
+      case "system_interaction":
+        consolidated.systemInteractions.push(k.text);
+        break;
+      case "error_handling":
+        consolidated.errorHandling.push(k.text);
+        break;
+      case "boundary_condition":
+        consolidated.boundaryConditions.push(k.text);
+        break;
+      case "schema_info":
+        for (const t of k.relatedTables) {
+          if (!consolidated.schemaInfo.tables.includes(t)) {
+            consolidated.schemaInfo.tables.push(t);
+          }
+          if (k.relatedFields.length > 0) {
+            consolidated.schemaInfo.columns.set(t, k.relatedFields);
+          }
+        }
+        break;
+    }
   }
 
-  // 2. Generate from validation rules
-  for (const k of byKind.validation_rule || []) {
-    cases.push(...generateFromValidation(k, sources, sqlContent));
-  }
+  return consolidated;
+}
 
-  // 3. Generate from business rules
-  for (const k of byKind.business_rule || []) {
-    cases.push(...generateFromBusinessRule(k, sources));
+function mapKnowledgeToReqKind(kind: ExtractedKnowledge["kind"]): ExtractedRequirement["kind"] {
+  switch (kind) {
+    case "requirement_statement": return "functional";
+    case "business_rule": return "business_rule";
+    case "validation_rule": return "validation";
+    case "boundary_condition": return "boundary";
+    case "error_handling": return "error_handling";
+    case "database_interaction": return "database";
+    case "system_interaction": return "integration";
+    case "input_output": return "ui";
+    case "flow_step": return "functional";
+    default: return "functional";
   }
-
-  // 4. Generate from error handling
-  for (const k of byKind.error_handling || []) {
-    cases.push(...generateFromErrorHandling(k, sources, sqlContent));
-  }
-
-  // 5. Generate from database interactions
-  for (const k of byKind.database_interaction || []) {
-    cases.push(...generateFromDatabaseInteraction(k, sources, sqlContent));
-  }
-
-  // 6. Generate from flow steps
-  for (const k of byKind.flow_step || []) {
-    cases.push(...generateFromFlowStep(k, sources));
-  }
-
-  // 7. Generate from boundary conditions
-  for (const k of byKind.boundary_condition || []) {
-    cases.push(...generateFromBoundary(k, sources));
-  }
-
-  // 8. Generate from input/output
-  for (const k of byKind.input_output || []) {
-    cases.push(...generateFromInputOutput(k, sources));
-  }
-
-  // 9. Generate from schema info (database validation)
-  for (const k of byKind.schema_info || []) {
-    cases.push(...generateFromSchema(k, sources, sqlContent));
-  }
-
-  // 10. Generate from system interactions
-  for (const k of byKind.system_interaction || []) {
-    cases.push(...generateFromSystemInteraction(k, sources));
-  }
-
-  // 11. Generate from architecture flow
-  for (const k of byKind.architecture_flow || []) {
-    cases.push(...generateFromArchitecture(k, sources));
-  }
-
-  // Deduplicate cases by description similarity
-  return deduplicateCases(cases);
 }
 
 // ============================================================
-// Generator per knowledge type
+// STAGE 2: BUSINESS FLOW IDENTIFICATION — Entity-based grouping
 // ============================================================
+function identifyBusinessFlows(consolidated: ConsolidatedKnowledge): BusinessFlow[] {
+  const flows: BusinessFlow[] = [];
 
-function generateFromRequirement(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
+  // --- Step 1: Extract entity clusters from all knowledge ---
+  const entityClusters = extractEntityClusters(consolidated);
 
-  // Positive test: verify the requirement works
-  cases.push(createCase(
-    `Verify: ${k.text.slice(0, 120)}`,
-    buildStepsFromRequirement(k.text),
-    buildPrecondition(k),
-    "",
-    `The system should ${k.text.toLowerCase().replace(/^(the system |the application |the )/, "")}`,
-    ["Functional", "Positive"],
-    k,
-    src,
-  ));
+  // --- Step 2: Build flows from entity clusters ---
+  for (const cluster of entityClusters) {
+    if (cluster.knowledgeIds.length < 1) continue;
 
-  // Negative test: verify invalid input is rejected
-  cases.push(createCase(
-    `Verify rejection of invalid input for: ${k.text.slice(0, 80)}`,
-    buildNegativeStepsFromRequirement(k.text),
-    buildPrecondition(k),
-    "",
-    "The system should reject invalid input and display an appropriate error message",
-    ["Functional", "Negative"],
-    k,
-    src,
-  ));
+    // Collect all tables, systems, jobs from this cluster's knowledge
+    const clusterKnowledge = consolidated.allKnowledge.filter(k => cluster.knowledgeIds.includes(k.id));
+    const allTables = [...new Set(clusterKnowledge.flatMap(k => k.relatedTables))];
+    const allUpstream = extractSystemNames(clusterKnowledge, "upstream");
+    const allDownstream = extractSystemNames(clusterKnowledge, "downstream");
+    const allJobs = extractJobNames(clusterKnowledge);
 
-  return cases;
-}
-
-function generateFromValidation(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-  sqlContent: SqlParsedContent[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  // Positive: validation passes
-  cases.push(createCase(
-    `Verify validation passes: ${k.text.slice(0, 100)}`,
-    `1. Provide valid input that satisfies the validation rule.\n2. Submit the request.\n3. Verify the system accepts the input.`,
-    buildPrecondition(k),
-    generateQueryIfPossible(k, sqlContent),
-    "The system should accept the valid input and proceed with processing",
-    ["Functional", "Positive"],
-    k,
-    src,
-  ));
-
-  // Negative: validation fails
-  cases.push(createCase(
-    `Verify validation failure: ${k.text.slice(0, 100)}`,
-    `1. Provide input that violates the validation rule.\n2. Submit the request.\n3. Verify the system rejects the input.`,
-    buildPrecondition(k),
-    generateQueryIfPossible(k, sqlContent),
-    "The system should reject the invalid input and display the appropriate validation error",
-    ["Functional", "Negative"],
-    k,
-    src,
-  ));
-
-  // Regression
-  cases.push(createCase(
-    `Regression: Verify existing validation still works: ${k.text.slice(0, 80)}`,
-    `1. Use known valid test data.\n2. Execute the validation flow.\n3. Confirm expected outcome.`,
-    buildPrecondition(k),
-    "",
-    "The existing validation behavior should continue to work as previously verified",
-    ["Regression"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromBusinessRule(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  cases.push(createCase(
-    `Verify business rule: ${k.text.slice(0, 110)}`,
-    buildStepsFromRequirement(k.text),
-    buildPrecondition(k),
-    "",
-    `The system should correctly apply the business rule: ${k.text.slice(0, 150)}`,
-    ["Functional", "Positive"],
-    k,
-    src,
-  ));
-
-  cases.push(createCase(
-    `Verify business rule failure scenario: ${k.text.slice(0, 90)}`,
-    `1. Set up conditions where the business rule is NOT met.\n2. Execute the process.\n3. Verify the system handles the rule violation correctly.`,
-    buildPrecondition(k),
-    "",
-    "The system should detect the rule violation and handle it according to the documented behavior",
-    ["Functional", "Negative"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromErrorHandling(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-  sqlContent: SqlParsedContent[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  cases.push(createCase(
-    `Verify error handling: ${k.text.slice(0, 110)}`,
-    `1. Trigger the error condition described in the source.\n2. Verify the system handles the error gracefully.\n3. Verify an appropriate error message is displayed.\n4. Verify the system remains in a stable state.`,
-    buildPrecondition(k),
-    generateQueryIfPossible(k, sqlContent),
-    "The system should handle the error gracefully, display a meaningful error message, and not crash or corrupt data",
-    ["Functional", "Negative"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromDatabaseInteraction(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-  sqlContent: SqlParsedContent[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  // Verify data is correctly persisted/retreived
-  cases.push(createCase(
-    `Verify database operation: ${k.text.slice(0, 110)}`,
-    `1. Execute the action that triggers the database operation.\n2. Verify the data is correctly stored/retrieved in the database.\n3. Verify data integrity and constraints are maintained.`,
-    buildPrecondition(k),
-    generateQueryIfPossible(k, sqlContent),
-    "The database operation should complete successfully with correct data integrity",
-    ["Functional"],
-    k,
-    src,
-  ));
-
-  // Verify query returns expected results
-  if (k.relatedTables.length > 0) {
-    cases.push(createCase(
-      `Verify data query: ${k.relatedTables.join(", ")} from ${k.text.slice(0, 80)}`,
-      `1. Set up test data in the relevant tables.\n2. Execute the query/operation.\n3. Verify the returned data matches expected results.`,
-      buildPrecondition(k),
-      generateQueryIfPossible(k, sqlContent),
-      "The query should return the correct data matching the test conditions",
-      ["Functional"],
-      k,
-      src,
-    ));
+    flows.push({
+      id: `flow_${flows.length + 1}`,
+      name: cluster.name,
+      description: cluster.description,
+      steps: clusterKnowledge.map(k => k.text.slice(0, 200)),
+      knowledgeIds: cluster.knowledgeIds,
+      upstreamSystems: allUpstream,
+      downstreamSystems: allDownstream,
+      databases: allTables,
+      jobs: allJobs,
+    });
   }
 
-  return cases;
-}
-
-function generateFromFlowStep(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  cases.push(createCase(
-    `Verify process flow: ${k.text.slice(0, 110)}`,
-    `1. Start at the beginning of the described flow.\n2. Execute each step in sequence.\n3. Verify each step completes successfully.\n4. Verify the final outcome matches expected behavior.`,
-    buildPrecondition(k),
-    "",
-    "The process flow should execute in the documented sequence with correct outcomes at each step",
-    ["Functional", "Positive"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromBoundary(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  // Test at boundary
-  cases.push(createCase(
-    `Boundary test: ${k.text.slice(0, 110)}`,
-    `1. Set the input to the exact boundary value described in the source.\n2. Submit the request.\n3. Verify the system handles the boundary value correctly.`,
-    buildPrecondition(k),
-    "",
-    "The system should correctly handle the boundary value according to the documented constraints",
-    ["Functional"],
-    k,
-    src,
-  ));
-
-  // Test just outside boundary
-  cases.push(createCase(
-    `Boundary exceeded: ${k.text.slice(0, 110)}`,
-    `1. Set the input to a value just beyond the documented boundary.\n2. Submit the request.\n3. Verify the system rejects or handles the out-of-bound value.`,
-    buildPrecondition(k),
-    "",
-    "The system should reject or handle the value that exceeds the documented boundary",
-    ["Functional", "Negative"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromInputOutput(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  cases.push(createCase(
-    `Verify input/output: ${k.text.slice(0, 110)}`,
-    `1. Provide the documented input.\n2. Execute the operation.\n3. Verify the expected output is displayed/returned.`,
-    buildPrecondition(k),
-    "",
-    "The system should produce the documented output for the given input",
-    ["Functional", "Positive"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromSchema(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-  sqlContent: SqlParsedContent[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  // Generate database validation test for each table
-  for (const table of k.relatedTables) {
-    const query = generateSchemaQuery(table, sqlContent);
-
-    cases.push(createCase(
-      `Verify database schema and data for ${table}`,
-      `1. Set up test data in ${table}.\n2. Execute the relevant operation.\n3. Query the database to verify the record was created/updated correctly.`,
-      `Test data is prepared and database is accessible`,
-      query,
-      `The ${table} table should contain the expected records with correct column values`,
-      ["Functional"],
-      k,
-      src,
-    ));
-  }
-
-  return cases;
-}
-
-function generateFromSystemInteraction(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  cases.push(createCase(
-    `Verify system interaction: ${k.text.slice(0, 110)}`,
-    `1. Trigger the system interaction described in the source.\n2. Verify the request/response is correctly handled.\n3. Verify the system state is updated accordingly.`,
-    buildPrecondition(k),
-    "",
-    "The system interaction should complete successfully with correct request/response handling",
-    ["Functional"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-function generateFromArchitecture(
-  k: ExtractedKnowledge,
-  sources: TestCaseSource[],
-): GeneratedTestCase[] {
-  const cases: GeneratedTestCase[] = [];
-  const src = sources.filter(s => s.documentName === getDocName(k.documentId, sources));
-
-  cases.push(createCase(
-    `End-to-end flow verification from architecture diagram`,
-    `1. Start at the system entry point.\n2. Follow the documented flow through each component.\n3. Verify each processing stage completes correctly.\n4. Verify the final output/response.\n5. Verify database state if applicable.`,
-    "All system components are operational and test data is prepared",
-    "",
-    "The end-to-end flow should work as depicted in the architecture diagram",
-    ["Functional", "Positive"],
-    k,
-    src,
-  ));
-
-  cases.push(createCase(
-    `Verify error handling at each flow stage from architecture diagram`,
-    `1. At each component in the flow, introduce a failure condition.\n2. Verify the system handles the failure gracefully at each stage.\n3. Verify no data corruption occurs.`,
-    "All system components are operational and test data is prepared",
-    "",
-    "The system should handle failures at each stage gracefully without data corruption",
-    ["Functional", "Negative"],
-    k,
-    src,
-  ));
-
-  return cases;
-}
-
-// ============================================================
-// SQL Query Generation
-// ============================================================
-
-function generateQueryIfPossible(
-  k: ExtractedKnowledge,
-  sqlContent: SqlParsedContent[],
-): string {
-  if (k.relatedTables.length === 0) return "";
-
-  // Try to find the table in SQL content
-  for (const sql of sqlContent) {
-    for (const table of sql.tables) {
-      if (k.relatedTables.some(rt => rt.toUpperCase() === table.name.toUpperCase())) {
-        // Found the table — generate a query
-        return generateSchemaQuery(table.name, sqlContent);
+  // --- Step 3: Assign requirements to flows via sourceKnowledgeId mapping ---
+  for (const req of consolidated.requirements) {
+    for (const flow of flows) {
+      if (flow.knowledgeIds.includes(req.sourceKnowledgeId)) {
+        req.flowId = flow.id;
+        break;
+      }
+    }
+    // If no flow matched, try to match by entity overlap
+    if (!req.flowId) {
+      let bestFlow: string | null = null;
+      let bestOverlap = 0;
+      for (const flow of flows) {
+        const overlap = req.relatedTables.filter(t => flow.databases.includes(t)).length;
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          bestFlow = flow.id;
+        }
+      }
+      if (bestFlow) {
+        req.flowId = bestFlow;
       }
     }
   }
 
-  // If we have table references but no schema, generate a placeholder query
-  if (k.relatedTables.length > 0) {
-    const table = k.relatedTables[0];
-    return `SELECT *\nFROM ${table}\nWHERE <CONDITION>;\n\n-- Placeholder: replace <CONDITION> with the actual filter condition`;
-  }
+  // --- Step 4: Collect unclassified requirements into a catch-all ---
+  const unclassified = consolidated.requirements.filter(r => !r.flowId);
+  if (unclassified.length > 0) {
+    const unclassKnowledge = unclassified.map(r => r.sourceKnowledgeId);
+    const unclassTexts = unclassified.map(r => r.text);
 
-  return "";
-}
+    // Try to sub-divide unclassified by keyword themes
+    const themes = subDivideByTheme(unclassified);
+    for (const theme of themes) {
+      flows.push({
+        id: `flow_${flows.length + 1}`,
+        name: theme.name,
+        description: theme.description,
+        steps: theme.texts.slice(0, 20),
+        knowledgeIds: theme.knowledgeIds,
+        upstreamSystems: [],
+        downstreamSystems: [],
+        databases: [...new Set(theme.tables)],
+        jobs: [],
+      });
+    }
 
-function generateSchemaQuery(
-  tableName: string,
-  sqlContent: SqlParsedContent[],
-): string {
-  for (const sql of sqlContent) {
-    const tableDef = sql.tables.find(t => t.name.toUpperCase() === tableName.toUpperCase());
-    if (tableDef) {
-      // Build a SELECT query from the schema
-      const cols = tableDef.columns.map(c => c.name).join(", ");
-      const pkCol = tableDef.columns.find(c => c.isPrimaryKey);
-      if (pkCol) {
-        return `SELECT ${cols}\nFROM ${tableName}\nWHERE ${pkCol.name} = <${pkCol.name}>;`;
+    // If still some unclassified, put into General
+    const stillUnclassified = consolidated.requirements.filter(r => !r.flowId);
+    if (stillUnclassified.length > 0) {
+      flows.push({
+        id: "flow_general",
+        name: "General Business Logic",
+        description: "Remaining business logic not assigned to a specific flow",
+        steps: stillUnclassified.map(r => r.text.slice(0, 200)),
+        knowledgeIds: stillUnclassified.map(r => r.sourceKnowledgeId),
+        upstreamSystems: [],
+        downstreamSystems: [],
+        databases: [...new Set(stillUnclassified.flatMap(r => r.relatedTables))],
+        jobs: [],
+      });
+      for (const r of stillUnclassified) {
+        r.flowId = "flow_general";
       }
-      return `SELECT ${cols}\nFROM ${tableName}\nWHERE <CONDITION>;`;
     }
   }
 
-  // No schema found
-  return `SELECT *\nFROM ${tableName}\nWHERE <CONDITION>;\n\n-- Unable to generate precise query — required table/column information is not fully available in the uploaded sources.`;
+  return flows;
+}
+
+// --- Entity cluster extraction ---
+interface EntityCluster {
+  name: string;
+  description: string;
+  knowledgeIds: string[];
+  texts: string[];
+  tables: string[];
+  entities: string[];
+}
+
+function extractEntityClusters(consolidated: ConsolidatedKnowledge): EntityCluster[] {
+  const clusters: EntityCluster[] = [];
+
+  // Build entity -> knowledge mapping
+  const entityMap = new Map<string, Set<string>>(); // entity -> set of knowledge IDs
+
+  for (const k of consolidated.allKnowledge) {
+    const entities = extractEntitiesFromText(k.text);
+    entities.forEach(entity => {
+      if (!entityMap.has(entity)) entityMap.set(entity, new Set());
+      entityMap.get(entity)!.add(k.id);
+    });
+    // Also index by related tables
+    k.relatedTables.forEach(table => {
+      const normalizedTable = table.toUpperCase();
+      if (!entityMap.has(normalizedTable)) entityMap.set(normalizedTable, new Set());
+      entityMap.get(normalizedTable)!.add(k.id);
+    });
+  }
+
+  // Cluster entities that co-occur in the same knowledge items
+  const visited = new Set<string>();
+  const entityList = [...entityMap.keys()].sort((a, b) => (entityMap.get(b)?.size || 0) - (entityMap.get(a)?.size || 0));
+
+  for (const entity of entityList) {
+    if (visited.has(entity)) continue;
+    const knowledgeIds = entityMap.get(entity);
+    if (!knowledgeIds || knowledgeIds.size === 0) continue;
+
+    // Find all co-occurring entities
+    const clusterEntities = new Set<string>([entity]);
+    const clusterKnowledge = new Set<string>(knowledgeIds);
+
+    // Expand: find other entities that share knowledge items
+    for (const otherEntity of entityList) {
+      if (otherEntity === entity || visited.has(otherEntity)) continue;
+      const otherKnowledge = entityMap.get(otherEntity);
+      if (!otherKnowledge) continue;
+
+      // If >30% overlap, they belong together
+      const overlap = [...otherKnowledge].filter(kid => clusterKnowledge.has(kid)).length;
+      if (overlap >= 1 && overlap >= otherKnowledge.size * 0.2) {
+        clusterEntities.add(otherEntity);
+        otherKnowledge.forEach(kid => clusterKnowledge.add(kid));
+      }
+    }
+
+    if (clusterKnowledge.size < 1) continue;
+
+    // Name the cluster based on primary entity
+    const name = humanizeEntityName(entity);
+    const tables = [...clusterEntities].filter(e => e === e.toUpperCase() && e.length >= 3);
+
+    clusters.push({
+      name,
+      description: `Business flow covering ${name.toLowerCase()} functionality`,
+      knowledgeIds: [...clusterKnowledge],
+      texts: [...clusterKnowledge].map(kid => {
+        const k = consolidated.allKnowledge.find(kk => kk.id === kid);
+        return k ? k.text.slice(0, 200) : "";
+      }).filter(Boolean),
+      tables,
+      entities: [...clusterEntities],
+    });
+
+    clusterEntities.forEach(e => visited.add(e));
+    clusterKnowledge.forEach(kid => visited.add(kid));
+  }
+
+  return clusters;
+}
+
+function extractEntitiesFromText(text: string): string[] {
+  const entities = new Set<string>();
+  const upper = text.toUpperCase();
+
+  // Extract CAPS identifiers (table names, system names, etc.)
+  const capsMatches = upper.matchAll(/\b([A-Z][A-Z0-9_]{2,30})\b/g);
+  const excludes = new Set(["THE", "AND", "FOR", "NOT", "BUT", "WAS", "ARE", "HAS", "HAD", "ITS", "ALL",
+    "CAN", "HER", "OUR", "ONE", "ANY", "MAY", "USE", "YES", "WHO", "GET", "NEW", "NOW", "OLD", "SEE",
+    "HOW", "LET", "SAY", "SHE", "TOO", "WAY", "MUST", "SHALL", "WILL", "THIS", "THAT", "WITH", "FROM",
+    "HAVE", "BEEN", "DOES", "ONLY", "ALSO", "EACH", "BOTH", "SOME", "WHAT", "WHEN", "TIME", "VERY",
+    "JUST", "INTO", "THAN", "MORE", "MOST", "WELL", "BACK", "MANY", "SUCH", "TAKE", "COME", "COULD",
+    "BEING", "WOULD", "SHOULD", "AFTER", "BELOW", "ABOVE", "WHICH", "WHERE", "THESE", "THOSE", "OTHER",
+    "EVERY", "FIRST", "NEXT", "THEN", "WILL", "BEEN", "MAKE", "LIKE", "LONG", "LOOK", "MANY", "SOME",
+    "THAN", "THEM", "ALSO", "USED", "EACH", "GIVE", "MOST", "HERE", "WHEN", "UPON", "DONE", "GOOD",
+    "EACH", "EACH", "LEFT", "REAL", "LIFE", "KEEP", "SAME", "LAST", "VIEW", "SEEN", "THUS", "DATA"]);
+
+  for (const m of capsMatches) {
+    const word = m[1];
+    if (!excludes.has(word) && word.length >= 3 && word.length <= 30) {
+      entities.add(word);
+    }
+  }
+
+  // Extract domain keywords as entities
+  const lower = text.toLowerCase();
+  const domainPatterns: [RegExp, string][] = [
+    [/\b(?:claim|claims)\b/, "Claims"],
+    [/\b(?:credit|credits)\b/, "Credit"],
+    [/\b(?:billing|bill)\b/, "Billing"],
+    [/\b(?:charge|charges)\b/, "Charge"],
+    [/\b(?:payment|payments)\b/, "Payment"],
+    [/\b(?:calculation|calculate|comput)\b/, "Calculation"],
+    [/\b(?:validation|validate|verify)\b/, "Validation"],
+    [/\b(?:eligib)\w*/, "Eligibility"],
+    [/\b(?:cap|threshold|limit|maximum|minimum)\b/, "Threshold/Cap"],
+    [/\b(?:batch|job|queue|process)\b/, "Batch/Job Processing"],
+    [/\b(?:report|summary|export)\b/, "Reporting"],
+    [/\b(?:config|setting|parameter)\b/, "Configuration"],
+    [/\b(?:error|exception|rejection|fail)\b/, "Error Handling"],
+    [/\b(?:status|lifecycle|state)\b/, "Status/State"],
+    [/\b(?:insert|update|delete|persist|store|create|write)\b/, "Data Persistence"],
+    [/\b(?:extract|select|read|query|fetch|load)\b/, "Data Retrieval"],
+    [/\b(?:ui|screen|page|form|field|input|button|display)\b/, "UI"],
+    [/\b(?:api|service|endpoint|request|response|rest)\b/, "API/Service"],
+    [/\b(?:downstream|upstream|integration|feed)\b/, "Integration"],
+  ];
+
+  for (const [pattern, entity] of domainPatterns) {
+    if (pattern.test(lower)) {
+      entities.add(entity.toUpperCase());
+    }
+  }
+
+  return [...entities];
+}
+
+function humanizeEntityName(entity: string): string {
+  // If it's a TABLE_LIKE_NAME, convert to human readable
+  if (entity === entity.toUpperCase() && entity.includes("_")) {
+    return entity.split("_").map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(" ");
+  }
+  if (entity === entity.toUpperCase()) {
+    return entity.charAt(0) + entity.slice(1).toLowerCase();
+  }
+  // camelCase → Title Case
+  return entity.replace(/([A-Z])/g, " $1").trim().replace(/\b\w/g, c => c.toUpperCase());
+}
+
+// --- Sub-divide unclassified by theme ---
+function subDivideByTheme(reqs: ExtractedRequirement[]): EntityCluster[] {
+  const themes: EntityCluster[] = [];
+  const themeMap = new Map<string, { reqs: ExtractedRequirement[]; texts: string[]; tables: string[]; knowledgeIds: string[] }>();
+
+  for (const req of reqs) {
+    const theme = guessTheme(req.text);
+    if (!themeMap.has(theme)) {
+      themeMap.set(theme, { reqs: [], texts: [], tables: [], knowledgeIds: [] });
+    }
+    const t = themeMap.get(theme)!;
+    t.reqs.push(req);
+    t.texts.push(req.text.slice(0, 200));
+    t.tables.push(...req.relatedTables);
+    t.knowledgeIds.push(req.sourceKnowledgeId);
+  }
+
+  for (const [themeName, data] of themeMap) {
+    if (data.reqs.length === 0) continue;
+    for (const r of data.reqs) r.flowId = `flow_themes_${themes.length}`;
+    themes.push({
+      name: themeName,
+      description: `Business flow covering ${themeName.toLowerCase()} functionality`,
+      knowledgeIds: data.knowledgeIds,
+      texts: data.texts,
+      tables: [...new Set(data.tables)],
+      entities: [],
+    });
+  }
+
+  return themes;
+}
+
+function guessTheme(text: string): string {
+  const lower = text.toLowerCase();
+  if (/\b(?:calculat|compute|amount|fee|credit|rate|charge|total|sum|balance)\b/.test(lower)) return "Calculation & Financial Processing";
+  if (/\b(?:valid|check|verify|confirm|rule|constraint|condition|eligib|qualif)\b/.test(lower)) return "Validation & Business Rules";
+  if (/\b(?:error|exception|fail|reject|invalid|denied|timeout|missing|null|empty)\b/.test(lower)) return "Error Handling & Rejection";
+  if (/\b(?:insert|update|delete|create|persist|store|write|save|database|table|record)\b/.test(lower)) return "Data Persistence & Storage";
+  if (/\b(?:extract|select|read|query|fetch|load|get|search|find|lookup)\b/.test(lower)) return "Data Retrieval & Querying";
+  if (/\b(?:job|batch|queue|schedule|process|run|execute|trigger|start|stop)\b/.test(lower)) return "Batch & Job Processing";
+  if (/\b(?:ui|screen|page|form|field|input|button|display|show|render|navigate|click)\b/.test(lower)) return "User Interface & Interaction";
+  if (/\b(?:api|service|endpoint|request|response|rest|soap|message|publish|subscribe)\b/.test(lower)) return "API & Service Integration";
+  if (/\b(?:report|summary|export|import|download|upload|print|pdf|excel)\b/.test(lower)) return "Reporting & Export";
+  if (/\b(?:config|setting|parameter|option|preference|threshold|limit|cap)\b/.test(lower)) return "Configuration & Settings";
+  if (/\b(?:status|lifecycle|state|transition|workflow|approval|reject|pending|complete)\b/.test(lower)) return "Status & Workflow Management";
+  if (/\b(?:log|audit|trail|history|track|monitor|trace)\b/.test(lower)) return "Logging & Audit";
+  return "General Business Logic";
+}
+
+function extractSystemNames(knowledge: ExtractedKnowledge[], direction: "upstream" | "downstream"): string[] {
+  const names = new Set<string>();
+  for (const k of knowledge) {
+    if (direction === "upstream") {
+      const matches = k.text.match(/\b(EDW|KDW|SOURCE|INPUT|EXTRACT|UPSTREAM|FEEDER|STAGING)\b/gi);
+      if (matches) matches.slice(0, 3).forEach(m => names.add(m.toUpperCase()));
+    } else {
+      const matches = k.text.match(/\b(TARGET|OUTPUT|QUEUE|CORE|CLAIM|DESTINATION|DOWNSTREAM|RESULT)\b/gi);
+      if (matches) matches.slice(0, 3).forEach(m => names.add(m.toUpperCase()));
+    }
+  }
+  return Array.from(names).slice(0, 5);
+}
+
+function extractJobNames(knowledge: ExtractedKnowledge[]): string[] {
+  const jobs = new Set<string>();
+  for (const k of knowledge) {
+    const matches = k.text.match(/\b(\w+Job|\w+Batch|\w+Process|[A-Z]{2,10}_\w+|Credit\w*Job|Claim\w*Job|Fee\w*Job)\b/g);
+    if (matches) matches.slice(0, 3).forEach(m => jobs.add(m));
+  }
+  return Array.from(jobs).slice(0, 5);
 }
 
 // ============================================================
-// Helper Builders
+// STAGE 3–4: SCENARIO OPTIMIZATION — Meaningful E2E grouping
 // ============================================================
+interface CandidateScenario {
+  id: string;
+  flowId: string;
+  flowName: string;
+  title: string;
+  description: string;
+  requirementIds: string[];
+  sourceKnowledgeIds: string[];
+  condition: "positive" | "negative" | "boundary" | "error";
+  keyEntities: string[];
+  databaseTables: string[];
+  knowledgeTexts: string[];
+}
 
-function buildStepsFromRequirement(text: string): string {
-  // Convert requirement text into test steps
+function optimizeScenarios(
+  consolidated: ConsolidatedKnowledge,
+  flows: BusinessFlow[],
+): CandidateScenario[] {
+  const scenarios: CandidateScenario[] = [];
+  let scenarioIdx = 0;
+
+  for (const flow of flows) {
+    const flowReqs = consolidated.requirements.filter(r => r.flowId === flow.id);
+    if (flowReqs.length === 0) continue;
+
+    // Group requirements by their sub-theme within this flow
+    const subGroups = groupRequirementsBySubTheme(flowReqs);
+
+    for (const subGroup of subGroups) {
+      // For each sub-group, create meaningful scenario variations
+      const positiveReqs = subGroup.filter(r => ["functional", "ui", "database", "integration"].includes(r.kind));
+      const validationReqs = subGroup.filter(r => ["validation", "business_rule"].includes(r.kind));
+      const negativeReqs = subGroup.filter(r => ["error_handling"].includes(r.kind));
+      const boundaryReqs = subGroup.filter(r => ["boundary"].includes(r.kind));
+
+      // Scenario: Happy path / main E2E flow
+      const happyPathReqs = [...positiveReqs, ...validationReqs];
+      if (happyPathReqs.length > 0) {
+        const reqIds = happyPathReqs.map(r => r.id);
+        const kIds = happyPathReqs.map(r => r.sourceKnowledgeId);
+        scenarios.push({
+          id: `sc_${++scenarioIdx}`,
+          flowId: flow.id,
+          flowName: flow.name,
+          title: buildScenarioTitle(flow.name, subGroup, "positive"),
+          description: buildScenarioDescription(flow.name, subGroup, "positive"),
+          requirementIds: reqIds,
+          sourceKnowledgeIds: kIds,
+          condition: "positive",
+          keyEntities: extractKeyEntities(subGroup),
+          databaseTables: [...new Set(subGroup.flatMap(r => r.relatedTables))],
+          knowledgeTexts: subGroup.map(r => r.text),
+        });
+      }
+
+      // Scenario: Negative / error (only if material negative behavior exists)
+      if (negativeReqs.length > 0) {
+        // Check if negative scenarios are meaningfully different from each other
+        const negativeClusters = clusterByOutcome(negativeReqs);
+        for (const negCluster of negativeClusters) {
+          const reqIds = negCluster.map(r => r.id);
+          const kIds = negCluster.map(r => r.sourceKnowledgeId);
+          scenarios.push({
+            id: `sc_${++scenarioIdx}`,
+            flowId: flow.id,
+            flowName: flow.name,
+            title: buildScenarioTitle(flow.name, negCluster, "negative"),
+            description: buildScenarioDescription(flow.name, negCluster, "negative"),
+            requirementIds: reqIds,
+            sourceKnowledgeIds: kIds,
+            condition: "negative",
+            keyEntities: extractKeyEntities(negCluster),
+            databaseTables: [...new Set(negCluster.flatMap(r => r.relatedTables))],
+            knowledgeTexts: negCluster.map(r => r.text),
+          });
+        }
+      }
+
+      // Scenario: Boundary (only when material boundary behavior exists)
+      if (boundaryReqs.length > 0) {
+        const reqIds = boundaryReqs.map(r => r.id);
+        const kIds = boundaryReqs.map(r => r.sourceKnowledgeId);
+        scenarios.push({
+          id: `sc_${++scenarioIdx}`,
+          flowId: flow.id,
+          flowName: flow.name,
+          title: buildScenarioTitle(flow.name, boundaryReqs, "boundary"),
+          description: buildScenarioDescription(flow.name, boundaryReqs, "boundary"),
+          requirementIds: reqIds,
+          sourceKnowledgeIds: kIds,
+          condition: "boundary",
+          keyEntities: extractKeyEntities(boundaryReqs),
+          databaseTables: [...new Set(boundaryReqs.flatMap(r => r.relatedTables))],
+          knowledgeTexts: boundaryReqs.map(r => r.text),
+        });
+      }
+    }
+  }
+
+  return deduplicateScenarios(scenarios);
+}
+
+// --- Group requirements within a flow by sub-theme ---
+function groupRequirementsBySubTheme(reqs: ExtractedRequirement[]): ExtractedRequirement[][] {
+  const groups = new Map<string, ExtractedRequirement[]>();
+
+  for (const req of reqs) {
+    const subTheme = guessSubTheme(req.text, req.kind);
+    if (!groups.has(subTheme)) groups.set(subTheme, []);
+    groups.get(subTheme)!.push(req);
+  }
+
+  return [...groups.values()];
+}
+
+function guessSubTheme(text: string, kind: string): string {
   const lower = text.toLowerCase();
 
-  if (/\b(validat|verif|check|ensur)\b/.test(lower)) {
-    return `1. Set up the required test conditions.\n2. Execute the validation/check described.\n3. Verify the system validates correctly.\n4. Confirm the expected outcome.`;
+  // If it's a database requirement, group by table
+  if (kind === "database") {
+    const tables = text.match(/\b([A-Z][A-Z0-9_]{2,20})\b/g) || [];
+    if (tables.length > 0) return `DB: ${tables[0]}`;
+    return "DB Operations";
   }
 
-  if (/\b(create|add|insert|submit|send|post)\b/.test(lower)) {
-    return `1. Navigate to the relevant screen/endpoint.\n2. Provide the required input data.\n3. Submit/create the record.\n4. Verify the record is created successfully.`;
+  // If it's a validation, group by what's being validated
+  if (kind === "validation" || kind === "business_rule") {
+    if (/\b(amount|fee|credit|charge|calculation|rate|total)\b/.test(lower)) return "Financial Validation";
+    if (/\b(status|state|lifecycle|code)\b/.test(lower)) return "Status Validation";
+    if (/\b(eligib|qualif|criteria|requirement|condition)\b/.test(lower)) return "Eligibility Validation";
+    if (/\b(data|integrity|completeness|format|length)\b/.test(lower)) return "Data Validation";
+    return "Business Rule Validation";
   }
 
-  if (/\b(update|modify|change|edit)\b/.test(lower)) {
-    return `1. Locate an existing record.\n2. Modify the required fields.\n3. Save the changes.\n4. Verify the update is reflected correctly.`;
+  // Functional requirements — group by domain area
+  if (kind === "functional" || kind === "ui") {
+    if (/\b(batch|job|queue|schedule|process|run)\b/.test(lower)) return "Batch Processing";
+    if (/\b(ui|screen|page|form|field|input|button|display|show)\b/.test(lower)) return "User Interface";
+    if (/\b(report|summary|export|import|download)\b/.test(lower)) return "Reporting";
+    if (/\b(config|setting|parameter|option)\b/.test(lower)) return "Configuration";
   }
 
-  if (/\b(delete|remove|cancel|void)\b/.test(lower)) {
-    return `1. Locate an existing record.\n2. Initiate the delete/remove operation.\n3. Confirm the action.\n4. Verify the record is removed/voided.`;
+  // Integration
+  if (kind === "integration") {
+    if (/\b(api|service|endpoint|rest|soap)\b/.test(lower)) return "API Integration";
+    if (/\b(downstream|upstream|feed|interface)\b/.test(lower)) return "System Integration";
+    return "Integration";
   }
 
-  if (/\b(display|show|render|present|list)\b/.test(lower)) {
-    return `1. Navigate to the relevant screen.\n2. Trigger the display operation.\n3. Verify the correct data is displayed.\n4. Verify formatting and layout.`;
-  }
-
-  return `1. Set up the required test conditions.\n2. Execute the operation described in the requirement.\n3. Verify the system behaves as documented.\n4. Confirm the expected outcome.`;
+  return "Core Logic";
 }
 
-function buildNegativeStepsFromRequirement(text: string): string {
-  return `1. Set up conditions where the requirement is NOT satisfied.\n2. Attempt the operation.\n3. Verify the system rejects/prevents the invalid operation.\n4. Verify an appropriate error/warning message is shown.`;
+// --- Cluster negative requirements by their outcome ---
+function clusterByOutcome(reqs: ExtractedRequirement[]): ExtractedRequirement[][] {
+  if (reqs.length <= 2) return [reqs];
+
+  const groups: ExtractedRequirement[][] = [];
+  const used = new Set<number>();
+
+  for (let i = 0; i < reqs.length; i++) {
+    if (used.has(i)) continue;
+    const group = [reqs[i]];
+    used.add(i);
+
+    for (let j = i + 1; j < reqs.length; j++) {
+      if (used.has(j)) continue;
+      // If they describe similar failure outcomes, merge
+      if (areSimilarOutcomes(reqs[i].text, reqs[j].text)) {
+        group.push(reqs[j]);
+        used.add(j);
+      }
+    }
+    groups.push(group);
+  }
+
+  return groups;
 }
 
-function buildPrecondition(k: ExtractedKnowledge): string {
-  const parts: string[] = ["User is logged in and has appropriate access"];
+function areSimilarOutcomes(text1: string, text2: string): boolean {
+  const lower1 = text1.toLowerCase();
+  const lower2 = text2.toLowerCase();
 
-  if (k.relatedTables.length > 0) {
-    parts.push(`Test data exists in: ${k.relatedTables.join(", ")}`);
+  // Same failure keyword = same outcome category
+  const failPatterns = [
+    /\b(?:reject|denied|blocked)\b/,
+    /\b(?:error|exception|fail)\b/,
+    /\b(?:invalid|incorrect|wrong)\b/,
+    /\b(?:missing|null|empty|blank)\b/,
+    /\b(?:timeout|expired|overdue)\b/,
+    /\b(?:duplicate|conflict|already)\b/,
+  ];
+
+  for (const pattern of failPatterns) {
+    if (pattern.test(lower1) && pattern.test(lower2)) return true;
   }
 
-  if (k.kind === "validation_rule" || k.kind === "business_rule") {
-    parts.push("Valid test data is prepared for both positive and negative scenarios");
-  }
-
-  if (k.kind === "database_interaction") {
-    parts.push("Database connection is available and test schema is set up");
-  }
-
-  if (k.kind === "system_interaction") {
-    parts.push("All system components and dependencies are operational");
-  }
-
-  return parts.join(". ");
+  return false;
 }
 
-function createCase(
-  description: string,
-  steps: string,
-  precondition: string,
-  query: string,
-  expectedResults: string,
-  types: TestCaseGenType[],
-  k: ExtractedKnowledge,
+// --- Build meaningful scenario titles ---
+function buildScenarioTitle(flowName: string, reqs: ExtractedRequirement[], condition: string): string {
+  const keyEntities = extractKeyEntities(reqs);
+  const entityStr = keyEntities.length > 0 ? keyEntities.slice(0, 2).join(" & ") : "";
+
+  if (condition === "positive") {
+    if (entityStr) return `${flowName} — ${entityStr} Processing`;
+    return `${flowName} — Happy Path`;
+  }
+  if (condition === "negative") {
+    const failType = detectFailureType(reqs);
+    if (entityStr) return `${flowName} — ${failType} for ${entityStr}`;
+    return `${flowName} — ${failType}`;
+  }
+  if (condition === "boundary") {
+    if (entityStr) return `${flowName} — Boundary Conditions for ${entityStr}`;
+    return `${flowName} — Boundary Conditions`;
+  }
+  return `${flowName} — Scenario`;
+}
+
+function detectFailureType(reqs: ExtractedRequirement[]): string {
+  const allText = reqs.map(r => r.text.toLowerCase()).join(" ");
+  if (/\breject\b/.test(allText)) return "Rejection Handling";
+  if (/\b(invalid|incorrect|wrong)\b/.test(allText)) return "Invalid Input Handling";
+  if (/\b(missing|null|empty|blank)\b/.test(allText)) return "Missing Data Handling";
+  if (/\b(error|exception|fail)\b/.test(allText)) return "Error Handling";
+  if (/\b(timeout|expired)\b/.test(allText)) return "Timeout Handling";
+  if (/\b(duplicate|conflict)\b/.test(allText)) return "Duplicate Handling";
+  return "Negative Scenario";
+}
+
+function buildScenarioDescription(flowName: string, reqs: ExtractedRequirement[], condition: string): string {
+  const texts = reqs.map(r => r.text).join(" | ");
+
+  // Extract key actions
+  const actions = new Set<string>();
+  for (const req of reqs) {
+    const lower = req.text.toLowerCase();
+    if (/\bcalculat/.test(lower)) actions.add("calculates");
+    if (/\bvalid/.test(lower)) actions.add("validates");
+    if (/\breject/.test(lower)) actions.add("rejects");
+    if (/\b(insert|create|store|persist|write)\b/.test(lower)) actions.add("creates/updates records");
+    if (/\b(extract|select|read|query|fetch)\b/.test(lower)) actions.add("retrieves data");
+    if (/\b(process|batch|job)\b/.test(lower)) actions.add("processes");
+    if (/\b(display|show|render)\b/.test(lower)) actions.add("displays results");
+    if (/\b(error|fail|exception)\b/.test(lower)) actions.add("handles errors");
+  }
+
+  const actionStr = [...actions].slice(0, 3).join(", ");
+  return `${flowName} flow that ${actionStr || "handles"} the applicable business scenario.`;
+}
+
+function extractKeyEntities(reqs: ExtractedRequirement[]): string[] {
+  const entities = new Set<string>();
+  for (const r of reqs) {
+    for (const table of r.relatedTables) {
+      if (table.length >= 3) entities.add(table);
+    }
+    const matches = r.text.match(/\b([A-Z][A-Z_]{2,20})\b/g);
+    if (matches) matches.slice(0, 3).forEach(m => entities.add(m));
+  }
+  return Array.from(entities).slice(0, 5);
+}
+
+// --- Deduplicate scenarios ---
+function deduplicateScenarios(scenarios: CandidateScenario[]): CandidateScenario[] {
+  const unique: CandidateScenario[] = [];
+  const seenSignatures = new Set<string>();
+
+  for (const sc of scenarios) {
+    const sig = buildScenarioSignature(sc);
+    if (!seenSignatures.has(sig)) {
+      seenSignatures.add(sig);
+      unique.push(sc);
+    } else {
+      // Merge requirement IDs into the existing scenario
+      const existing = unique.find(u => buildScenarioSignature(u) === sig);
+      if (existing) {
+        existing.requirementIds = [...new Set([...existing.requirementIds, ...sc.requirementIds])];
+        existing.sourceKnowledgeIds = [...new Set([...existing.sourceKnowledgeIds, ...sc.sourceKnowledgeIds])];
+        existing.knowledgeTexts = [...new Set([...existing.knowledgeTexts, ...sc.knowledgeTexts])];
+      }
+    }
+  }
+
+  return unique;
+}
+
+function buildScenarioSignature(sc: CandidateScenario): string {
+  // Normalize for comparison
+  const title = sc.title.toLowerCase().replace(/[^a-z0-9& ]/g, "").replace(/\s+/g, " ").trim();
+  return `${sc.flowName}|${sc.condition}|${title}`;
+}
+
+// ============================================================
+// STAGE 5–6: E2E TESTCASE DESIGN + QUALITY
+// ============================================================
+function designTestCases(
+  scenarios: CandidateScenario[],
+  consolidated: ConsolidatedKnowledge,
+  flows: BusinessFlow[],
+  sqlContent: SqlParsedContent[],
   sources: TestCaseSource[],
-): GeneratedTestCase {
-  const id = `TC-${String(++tcCounter).padStart(3, "0")}`;
+): GeneratedTestCase[] {
+  const cases: GeneratedTestCase[] = [];
 
-  const caseSources: TestCaseSource[] = k.documentId
-    ? sources.filter(s => s.documentName.includes(getDocName(k.documentId, sources)))
-    : sources;
+  for (const sc of scenarios) {
+    const flow = flows.find(f => f.id === sc.flowId);
+    const priority = assignPriority(sc, consolidated);
+    const type = assignPrimaryType(sc);
 
-  // If no matching sources, use all available sources
-  const finalSources = caseSources.length > 0 ? caseSources : sources.slice(0, 1);
+    const steps = buildE2ESteps(sc, flow, consolidated);
+    const precondition = buildPrecondition(sc, flow);
+    const expectedResults = buildExpectedResults(sc, flow);
+    const query = buildQuery(sc, sqlContent);
+    const riskRationale = buildRiskRationale(sc, priority);
 
-  return {
-    id,
-    caseNumber: id,
-    description,
-    steps,
-    precondition,
-    query,
-    expectedResults,
-    types,
-    sources: finalSources,
-    status: "kept",
-    originalData: {
-      id,
-      caseNumber: id,
-      description,
+    const caseSources: TestCaseSource[] = buildCaseSources(sc, consolidated, sources);
+
+    cases.push({
+      id: `TC-${String(++tcCounter).padStart(3, "0")}`,
+      caseNumber: `TC-${String(tcCounter).padStart(3, "0")}`,
+      description: sc.title,
       steps,
       precondition,
       query,
       expectedResults,
-      types,
-      sources: finalSources,
-    },
+      types: [type],
+      priority,
+      businessFlow: sc.flowName,
+      requirementIds: sc.requirementIds,
+      sources: caseSources.length > 0 ? caseSources : sources.slice(0, 1),
+      riskRationale,
+      status: "kept",
+      originalData: {} as any,
+    });
+  }
+
+  // Set originalData for all cases
+  for (const tc of cases) {
+    tc.originalData = {
+      id: tc.id,
+      caseNumber: tc.caseNumber,
+      description: tc.description,
+      steps: tc.steps,
+      precondition: tc.precondition,
+      query: tc.query,
+      expectedResults: tc.expectedResults,
+      types: [...tc.types],
+      priority: tc.priority,
+      businessFlow: tc.businessFlow,
+      requirementIds: [...tc.requirementIds],
+      sources: [...tc.sources],
+      riskRationale: tc.riskRationale,
+    };
+  }
+
+  return cases;
+}
+
+// ============================================================
+// STAGE 7: PRIORITY ASSIGNMENT — Risk-based
+// ============================================================
+function assignPriority(
+  scenario: CandidateScenario,
+  consolidated: ConsolidatedKnowledge,
+): TestPriority {
+  let score = 0;
+  const allText = scenario.knowledgeTexts.join(" ").toLowerCase();
+
+  // Financial/calculation = highest priority
+  if (/\b(calculat|amount|fee|credit|charge|billing|payment|financial|money|currency)\b/.test(allText)) score += 4;
+  // Core validation
+  if (/\b(validat|verify|check|ensur|confirm)\b/.test(allText)) score += 2;
+  // Database persistence (data integrity)
+  if (/\b(insert|create|update|delete|database|record|persist|store)\b/.test(allText)) score += 2;
+  // Error handling
+  if (/\b(error|fail|reject|invalid|exception)\b/.test(allText)) score += 1;
+  // Batch/Job processing
+  if (/\b(job|batch|queue|process|extract|schedule)\b/.test(allText)) score += 2;
+  // Integration
+  if (/\b(api|service|endpoint|request|response|message|integration)\b/.test(allText)) score += 1;
+
+  // Multi-requirement scenarios are more important
+  if (scenario.requirementIds.length >= 5) score += 2;
+  else if (scenario.requirementIds.length >= 3) score += 1;
+
+  // Positive flows are generally higher priority than negative
+  if (scenario.condition === "positive") score += 1;
+
+  // DB-heavy scenarios = data integrity risk
+  if (scenario.databaseTables.length >= 2) score += 1;
+
+  if (score >= 7) return "P0";
+  if (score >= 4) return "P1";
+  if (score >= 2) return "P2";
+  return "P3";
+}
+
+function assignPrimaryType(scenario: CandidateScenario): TestCaseGenType {
+  switch (scenario.condition) {
+    case "positive": return "Functional";
+    case "negative": return "Negative";
+    case "boundary": return "Functional";
+    case "error": return "Negative";
+    default: return "Functional";
+  }
+}
+
+// ============================================================
+// STAGE 5: E2E STEP BUILDING — Specific, professional, business-aware
+// ============================================================
+function buildE2ESteps(
+  scenario: CandidateScenario,
+  flow: BusinessFlow | undefined,
+  consolidated: ConsolidatedKnowledge,
+): string {
+  const steps: string[] = [];
+  let stepNum = 1;
+
+  // Step 1: Setup — specific to the flow
+  if (flow?.databases && flow.databases.length > 0) {
+    steps.push(`${stepNum++}. Prepare prerequisite test data in ${flow.databases.slice(0, 2).join(" and ")}.`);
+  } else {
+    steps.push(`${stepNum++}. Prepare prerequisite test data and verify the test environment is available.`);
+  }
+
+  // Step 2: Configuration — if configuration is needed
+  const allTexts = [...new Set(scenario.knowledgeTexts)];
+  const hasConfig = allTexts.some(t => /\b(config|setting|parameter|threshold|cap|limit)\b/i.test(t));
+  if (hasConfig) {
+    const configText = allTexts.find(t => /\b(config|setting|parameter|threshold|cap|limit)\b/i.test(t));
+    steps.push(`${stepNum++}. Configure the required ${extractConfigTarget(configText || "")} through the application.`);
+  }
+
+  // Step 3+: Build meaningful steps from requirements, ordered logically
+  const orderedSteps = orderStepsByLogic(allTexts, scenario.condition);
+  for (const text of orderedSteps) {
+    const step = buildSingleStep(text, scenario.condition);
+    if (step) steps.push(`${stepNum++}. ${step}`);
+  }
+
+  // Step: Database validation if applicable
+  if (scenario.databaseTables.length > 0) {
+    steps.push(`${stepNum++}. Verify the expected records exist in ${scenario.databaseTables.slice(0, 3).join(", ")}.`);
+  }
+
+  // Step: Final outcome
+  if (scenario.condition === "positive") {
+    steps.push(`${stepNum++}. Verify the final business outcome is correct and all processing completed successfully.`);
+  } else if (scenario.condition === "negative") {
+    steps.push(`${stepNum++}. Verify the system correctly handles the error condition and no incorrect data is committed.`);
+  } else if (scenario.condition === "boundary") {
+    steps.push(`${stepNum++}. Verify the system correctly processes the boundary condition per the documented business rules.`);
+  }
+
+  return steps.join("\n");
+}
+
+function extractConfigTarget(text: string): string {
+  const lower = text.toLowerCase();
+  if (/cap|threshold|limit/.test(lower)) return "cap amount / threshold configuration";
+  if (/rate|fee|charge/.test(lower)) return "rate / fee configuration";
+  if (/rule|policy/.test(lower)) return "business rule configuration";
+  if (/status|code/.test(lower)) return "status code configuration";
+  return "application configuration";
+}
+
+function orderStepsByLogic(texts: string[], condition: string): string[] {
+  // Order: trigger → process → validate → result
+  const trigger: string[] = [];
+  const process: string[] = [];
+  const validate: string[] = [];
+  const result: string[] = [];
+
+  for (const text of texts) {
+    const lower = text.toLowerCase();
+    if (/\b(submit|send|trigger|start|initiate|enter|input|configure)\b/.test(lower)) {
+      trigger.push(text);
+    } else if (/\b(calculat|comput|determin|evaluat|transform|process)\b/.test(lower)) {
+      process.push(text);
+    } else if (/\b(verify|validate|confirm|check|ensure|assert)\b/.test(lower)) {
+      validate.push(text);
+    } else if (/\b(result|output|display|show|return|record|store|insert|create)\b/.test(lower)) {
+      result.push(text);
+    } else {
+      process.push(text); // default to process
+    }
+  }
+
+  return [...trigger, ...process, ...validate, ...result].slice(0, 10);
+}
+
+function buildSingleStep(text: string, condition: string): string | null {
+  let step = cleanSentence(text);
+  if (!step) return null;
+
+  // Ensure step starts with a verb or action
+  const lower = step.toLowerCase();
+  if (!/^(verify|validate|check|confirm|ensure|submit|enter|configure|execute|run|process|check|open|navigate|select|input|create|update|delete|insert|extract|load|send|trigger|start|initiate)\b/.test(lower)) {
+    // Prefix with appropriate action
+    if (/\b(reject|fail|error|invalid|denied|block)\b/.test(lower)) {
+      step = `Submit data that triggers: ${step.charAt(0).toLowerCase() + step.slice(1)}`;
+    } else if (/\b(should|must|shall|can|does|will)\b/.test(lower)) {
+      step = `Verify that ${step.charAt(0).toLowerCase() + step.slice(1)}`;
+    }
+  }
+
+  return step;
+}
+
+function buildPrecondition(
+  scenario: CandidateScenario,
+  flow: BusinessFlow | undefined,
+): string {
+  const parts: string[] = [];
+
+  parts.push("User has appropriate access to the application.");
+
+  if (scenario.databaseTables.length > 0) {
+    parts.push(`Required test data exists in ${scenario.databaseTables.slice(0, 3).join(", ")}.`);
+  }
+
+  if (flow?.jobs && flow.jobs.length > 0) {
+    parts.push(`Batch processing infrastructure is operational (${flow.jobs.slice(0, 2).join(", ")}).`);
+  }
+
+  if (flow?.upstreamSystems && flow.upstreamSystems.length > 0) {
+    parts.push(`Upstream systems (${flow.upstreamSystems.slice(0, 2).join(", ")}) are available and returning expected data.`);
+  }
+
+  if (scenario.condition === "negative") {
+    parts.push("Test data is configured to trigger the specific error/invalid condition.");
+  }
+
+  if (scenario.condition === "boundary") {
+    parts.push("Boundary/threshold values are configured per the documented business rules.");
+  }
+
+  return parts.join(" ");
+}
+
+function buildExpectedResults(
+  scenario: CandidateScenario,
+  flow: BusinessFlow | undefined,
+): string {
+  const parts: string[] = [];
+
+  if (scenario.condition === "positive") {
+    parts.push(`The ${scenario.flowName} flow completes successfully.`);
+    parts.push("All validations pass and data is processed correctly.");
+    if (scenario.databaseTables.length > 0) {
+      parts.push(`Expected records are created/updated in ${scenario.databaseTables.slice(0, 3).join(", ")}.`);
+    }
+    parts.push("The business outcome matches the documented expected behavior.");
+  } else if (scenario.condition === "negative") {
+    parts.push("The system correctly identifies the error/invalid condition.");
+    parts.push("An appropriate error message or rejection behavior is displayed.");
+    parts.push("No incorrect data is committed to the database.");
+    parts.push("The system maintains data integrity.");
+  } else if (scenario.condition === "boundary") {
+    parts.push("The system correctly handles the boundary condition.");
+    parts.push("The behavior at the edge value is consistent with the documented business rules.");
+    if (scenario.databaseTables.length > 0) {
+      parts.push(`Database records reflect the expected boundary behavior.`);
+    }
+  } else {
+    parts.push(`The ${scenario.flowName} flow produces the expected business outcome.`);
+  }
+
+  return parts.join(" ");
+}
+
+function buildQuery(
+  scenario: CandidateScenario,
+  sqlContent: SqlParsedContent[],
+): string {
+  if (scenario.databaseTables.length === 0) return "N/A — no database validation required";
+
+  const queries: string[] = [];
+
+  for (const tableName of scenario.databaseTables.slice(0, 3)) {
+    const tableDef = sqlContent
+      .flatMap(s => s.tables)
+      .find(t => t.name.toUpperCase() === tableName.toUpperCase());
+
+    if (tableDef && tableDef.columns.length > 0) {
+      const cols = tableDef.columns.map(c => `       ${c.name}`).join(",\n");
+      const pkCol = tableDef.columns.find(c => c.isPrimaryKey);
+      if (pkCol) {
+        queries.push(`SELECT\n       ${tableDef.columns.map(c => c.name).join(",\n       ")}\nFROM ${tableName}\nWHERE ${pkCol.name} = '<${pkCol.name}>';`);
+      } else {
+        queries.push(`SELECT\n       ${tableDef.columns.map(c => c.name).join(",\n       ")}\nFROM ${tableName}\nWHERE <CONDITION>;`);
+      }
+    } else if (tableDef) {
+      queries.push(`SELECT *\nFROM ${tableName}\nWHERE <CONDITION>;\n-- Note: specific column list not available from uploaded schema.`);
+    } else {
+      queries.push(`SELECT *\nFROM ${tableName}\nWHERE <CONDITION>;\n-- Schema information required: table/column details not found in uploaded sources.`);
+    }
+  }
+
+  return queries.length > 0 ? queries.join("\n\n") : "N/A — no database validation required";
+}
+
+function buildRiskRationale(scenario: CandidateScenario, priority: TestPriority): string {
+  const parts: string[] = [];
+
+  if (priority === "P0") {
+    parts.push("Critical business flow with high financial/data integrity risk.");
+  } else if (priority === "P1") {
+    parts.push("Important functional scenario with moderate business impact.");
+  } else if (priority === "P2") {
+    parts.push("Secondary functionality with lower business risk.");
+  } else {
+    parts.push("Low-risk edge case or informational validation.");
+  }
+
+  if (scenario.requirementIds.length >= 3) {
+    parts.push(`Covers ${scenario.requirementIds.length} requirements in a single E2E flow.`);
+  }
+
+  if (scenario.databaseTables.length > 0) {
+    parts.push(`Validates data integrity in ${scenario.databaseTables.length} database table(s).`);
+  }
+
+  return parts.join(" ");
+}
+
+function buildCaseSources(sc: CandidateScenario, consolidated: ConsolidatedKnowledge, sources: TestCaseSource[]): TestCaseSource[] {
+  const sourceMap = new Map<string, TestCaseSource>();
+
+  for (const reqId of sc.requirementIds) {
+    const req = consolidated.requirements.find(r => r.id === reqId);
+    if (!req) continue;
+    const docName = req.sourceRef.split(" → ")[0] || "Unknown";
+    if (!sourceMap.has(docName)) {
+      // Find matching source by documentName
+      const matchingSource = sources.find(s => s.documentName === docName);
+      sourceMap.set(docName, {
+        documentId: matchingSource?.documentId || "",
+        documentName: docName,
+        sectionRef: req.sourceRef,
+        kind: "requirement",
+      });
+    }
+  }
+
+  return [...sourceMap.values()];
+}
+
+// ============================================================
+// TEXT QUALITY
+// ============================================================
+function cleanSentence(text: string): string {
+  let cleaned = text.trim();
+
+  // Remove markdown artifacts
+  cleaned = cleaned.replace(/^\*\*|^#+\s*/, "");
+  cleaned = cleaned.replace(/\*\*$/g, "");
+
+  // Fix common grammar issues
+  cleaned = cleaned.replace(/\bverify that that\b/gi, "verify that");
+  cleaned = cleaned.replace(/\bcheck that that\b/gi, "check that");
+  cleaned = cleaned.replace(/\bthe the\b/gi, "the");
+  cleaned = cleaned.replace(/\ba a\b/gi, "a");
+  cleaned = cleaned.replace(/\ban an\b/gi, "an");
+
+  // Ensure proper capitalization
+  if (cleaned.length > 0) {
+    cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+
+  // Ensure ends with period
+  if (cleaned.length > 0 && !cleaned.endsWith(".") && !cleaned.endsWith(";") && !cleaned.endsWith(":")) {
+    cleaned += ".";
+  }
+
+  return cleaned;
+}
+
+// ============================================================
+// STAGE 8–9: COMPUTE SUMMARY
+// ============================================================
+function computeSummary(
+  cases: GeneratedTestCase[],
+  consolidated: ConsolidatedKnowledge,
+  flows: BusinessFlow[],
+  candidateCount: number,
+): TcgGenerationSummary {
+  const totalReqs = consolidated.requirements.length;
+  const coveredReqIds = new Set(cases.filter(c => c.status !== "ignored").flatMap(c => c.requirementIds));
+  const covered = coveredReqIds.size;
+  const uncovered = consolidated.requirements
+    .filter(r => !coveredReqIds.has(r.id))
+    .map(r => r.id);
+
+  return {
+    businessFlows: flows.length,
+    requirementsAnalyzed: totalReqs,
+    candidateScenarios: candidateCount,
+    duplicatesRemoved: candidateCount - cases.length,
+    optimizedScenarios: cases.length,
+    finalTestCases: cases.length,
+    p0Count: cases.filter(c => c.priority === "P0").length,
+    p1Count: cases.filter(c => c.priority === "P1").length,
+    p2Count: cases.filter(c => c.priority === "P2").length,
+    p3Count: cases.filter(c => c.priority === "P3").length,
+    requirementCoverage: totalReqs > 0 ? Math.round((covered / totalReqs) * 1000) / 10 : 0,
+    totalRequirements: totalReqs,
+    coveredRequirements: covered,
+    uncoveredRequirements: uncovered,
+    dbValidationCases: cases.filter(c => c.query !== "N/A — no database validation required" && c.query !== "N/A").length,
+    e2eFlows: flows.length,
+    flowNames: flows.map(f => f.name),
   };
 }
 
 // ============================================================
-// Utilities
+// MAIN ENTRY — Full pipeline
 // ============================================================
+export function generateTestCases(
+  knowledge: ExtractedKnowledge[],
+  documents: TcgDocument[],
+): { cases: GeneratedTestCase[]; summary: TcgGenerationSummary; flows: BusinessFlow[] } {
+  tcCounter = 0;
+  reqCounter = 0;
 
-function groupByKind(knowledge: ExtractedKnowledge[]): Record<string, ExtractedKnowledge[]> {
-  const groups: Record<string, ExtractedKnowledge[]> = {};
-  for (const k of knowledge) {
-    if (!groups[k.kind]) groups[k.kind] = [];
-    groups[k.kind].push(k);
-  }
-  return groups;
-}
+  const sources = documents
+    .filter(d => d.status === "parsed")
+    .map(d => ({
+      documentName: d.name,
+      documentId: d.id,
+      sectionRef: d.category,
+      kind: d.category as TestCaseSource["kind"],
+    }));
 
-function getDocName(documentId: string, sources: TestCaseSource[]): string {
-  // documentId is the TcgDocument.id; we need to match it
-  // Since sources don't carry documentId, return a generic match
-  return "";
-}
+  const sqlDocs = documents.filter(d => d.parsedContent?.kind === "sql");
+  const sqlContent = sqlDocs.map(d => d.parsedContent as SqlParsedContent);
 
-function deduplicateCases(cases: GeneratedTestCase[]): GeneratedTestCase[] {
-  const seen = new Map<string, GeneratedTestCase>();
+  // STAGE 1: Consolidate knowledge
+  const consolidated = consolidateKnowledge(knowledge, sources);
 
-  for (const tc of cases) {
-    // Simple dedup by first 80 chars of description
-    const key = tc.description.slice(0, 80).toLowerCase().replace(/\s+/g, " ");
-    if (!seen.has(key)) {
-      seen.set(key, tc);
-    }
-  }
+  // STAGE 2: Identify business flows
+  const flows = identifyBusinessFlows(consolidated);
 
-  return Array.from(seen.values());
+  // STAGE 3–4: Optimize scenarios
+  const scenarios = optimizeScenarios(consolidated, flows);
+  const candidateCount = scenarios.length;
+
+  // STAGE 5–6: Design E2E test cases
+  const cases = designTestCases(scenarios, consolidated, flows, sqlContent, sources);
+
+  // STAGE 8–9: Compute summary
+  const summary = computeSummary(cases, consolidated, flows, candidateCount);
+
+  // Sort by priority
+  const priorityOrder: Record<TestPriority, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+  cases.sort((a, b) => priorityOrder[a.priority] - priorityOrder[b.priority]);
+
+  return { cases, summary, flows };
 }
