@@ -1109,7 +1109,7 @@ ${anchors.map((a, i) => `  <xdr:twoCellAnchor>
       
       expect(result.blob).toBeTruthy();
       
-      const optZip = await loadZip(new Uint8Array(await result.blob!.arrayBuffer()));
+      const optZip = await loadZip(await result.blob!.arrayBuffer());
       
       // Check all 20 drawing files
       let totalAnchorsWithXfrm = 0;
@@ -1150,7 +1150,7 @@ ${anchors.map((a, i) => `  <xdr:twoCellAnchor>
               if (aOffY < 0 || aOffY > 50000000) {
                 mismatches++;
                 if (mismatches <= 5) {
-                  console.log(`  MISMATCH drawing${i}: row=${row} rowOff=${rowOff} a:off y=${aOffY} expected≈${expectedY}`);
+                  console.log(`  MISMATCH drawing${i}: row=${row} rowOff=${rowOff} a:off y=${aOffY}`);
                 }
               }
             }
