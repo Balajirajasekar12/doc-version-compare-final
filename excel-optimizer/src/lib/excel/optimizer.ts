@@ -13,7 +13,7 @@ import { loadZip, saveZip, Zip, readEntryText, listEntries } from "./zip";
 import { serializeSheet } from "./worksheet";
 import { checkNativeWellFormed, checkPartAttributes, checkPartStructure, snapshotStats, validateOutput } from "./validator";
 import { convertXls } from "./xls";
-import { repositionImages } from "./image-reposition";
+// import { repositionImages } from "./image-reposition"; // DISABLED: regex-based XML modification corrupts drawing XML — fixDrawingOverlaps handles this correctly
 import { debugLog } from "./debug-log";
 import { MAX_FILE_SIZE, validateUpload } from "./security";
 import {
@@ -249,19 +249,10 @@ export async function runOptimization(
   // Phase: Reposition images using ExcelJS (the only library that produces
   // valid OOXML drawing XML). Previous regex/xmldom approaches corrupted
   // real-world files because Excel's OOXML parser is stricter.
-  let imageRepositionStats: Awaited<ReturnType<typeof repositionImages>>["stats"] | null = null;
-  await stage("generating", "Optimizing screenshot layout…", 96, onProgress, async () => {
-    try {
-      const result = await repositionImages(buffer);
-      buffer = result.buffer as ArrayBuffer;
-      imageRepositionStats = result.stats;
-      debugLog.log("IMG_REPOS", `ExcelJS reposition: ${result.stats.totalImages} images, ${result.stats.imagesRepositioned} moved, overlaps ${result.stats.overlapsBefore}→${result.stats.overlapsAfter}`);
-    } catch (err) {
-      // If ExcelJS repositioning fails for any reason, continue with the
-      // original buffer (images stay in original positions — not corrupted).
-      debugLog.log("IMG_REPOS", `ExcelJS reposition failed (non-fatal): ${err}`);
-    }
-  });
+  // DISABLED: repositionImages uses regex-based XML modification which corrupts
+  // drawing XML for real-world files (Excel repair dialog → images wiped).
+  // fixDrawingOverlaps already handles repositioning correctly using XML DOM parsing.
+  // let imageRepositionStats: Awaited<ReturnType<typeof repositionImages>>["stats"] | null = null;
 
   // Validate the EXACT bytes the user will download: the generated package is
   // re-opened from disk-equivalent bytes (zip container + CRC checks) and
@@ -342,11 +333,11 @@ export async function runOptimization(
     headingsFormatted: counters.headingsFormatted,
     headingsTitleCased: counters.headingsTitleCased,
     imagesReSpaced,
-    imageOverlapsBefore: imageRepositionStats?.overlapsBefore ?? totalImageStats.overlapsBefore,
-    imageOverlapsAfter: imageRepositionStats?.overlapsAfter ?? totalImageStats.overlapsAfter,
-    imageContentConflictsBefore: imageRepositionStats?.contentConflictsBefore ?? totalImageStats.contentConflictsBefore,
-    imageContentConflictsAfter: imageRepositionStats?.contentConflictsAfter ?? totalImageStats.contentConflictsAfter,
-    imagesRepositioned: imageRepositionStats?.imagesRepositioned ?? totalImageStats.imagesRepositioned,
+    imageOverlapsBefore: totalImageStats.overlapsBefore,
+    imageOverlapsAfter: totalImageStats.overlapsAfter,
+    imageContentConflictsBefore: totalImageStats.contentConflictsBefore,
+    imageContentConflictsAfter: totalImageStats.contentConflictsAfter,
+    imagesRepositioned: totalImageStats.imagesRepositioned,
     imagesGrouped: totalImageStats.imagesGrouped,
     drawingAnalysis: perSheetDrawingAnalysis,
     tablesOptimized: counters.tablesOptimized,
