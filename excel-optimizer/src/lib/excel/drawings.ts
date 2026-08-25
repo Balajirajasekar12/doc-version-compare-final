@@ -27,10 +27,128 @@ import {
   firstChildElement,
   getAttr,
   parseXml,
+  serializeXml,
   textContent,
 } from "./xml";
 import { ParsedSheet } from "./worksheet";
 import { debugLog } from "./debug-log";
+
+/**
+ * Extracts the r:embed relationship ID from an anchor element.
+ * This uniquely identifies the image associated with the anchor.
+ *
+ * The r:embed appears as an ATTRIBUTE on <a:blip> elements:
+ *   <a:blip r:embed="rId1"/>
+ *
+ * We scan ALL descendant elements' attributes because getElementsByTagName("blip")
+ * does not match namespace-prefixed <a:blip> in @xmldom/xmldom.
+ */
+function getAnchorEmbedId(anchor: XmlEl): string {
+  const allElements = anchor.getElementsByTagName("*");
+  for (let i = 0; i < allElements.length; i++) {
+    const el = allElements[i] as XmlEl;
+    for (let j = 0; j < el.attributes.length; j++) {
+      const attr = el.attributes[j];
+      if (attr.localName === "embed") return attr.value;
+    }
+  }
+  return "";
+}
+
+/**
+ * Discovers LOGICAL drawings in the drawing XML, correctly handling
+ * mc:AlternateContent → mc:Choice / mc:Fallback.
+ *
+ * In OOXML, mc:AlternateContent provides version-compatible markup:
+ *   - mc:Choice = preferred/newer markup (used when supported)
+ *   - mc:Fallback = fallback/older markup (used when Choice unsupported)
+ *
+ * Both represent the SAME logical drawing with the SAME r:embed.
+ * They must NOT be counted as two independent images.
+ *
+ * Returns one entry per unique r:embed (logical drawing), with:
+ *   - all XML anchor elements for that drawing (Choice + Fallback + direct)
+ *   - the preferred anchor (Choice > direct > Fallback)
+ *   - the r:embed identity for structural matching
+ */
+function findLogicalDrawings(root: XmlEl): Array<{
+  embedId: string;
+  anchors: XmlEl[];
+  preferred: XmlEl;
+  index: number;
+}> {
+  // Step 1: Recursively find ALL anchor elements at any depth
+  interface FoundAnchor {
+    anchor: XmlEl;
+    branch: "choice" | "fallback" | "direct";
+  }
+
+  function findAll(node: XmlEl): FoundAnchor[] {
+    const result: FoundAnchor[] = [];
+    for (let i = 0; i < node.childNodes.length; i++) {
+      const child = node.childNodes[i];
+      if (child.nodeType !== 1) continue;
+      const el = child as XmlEl;
+      const name = el.localName || el.nodeName;
+      if (name === "twoCellAnchor" || name === "oneCellAnchor") {
+        // Determine which mc: branch this anchor is in
+        let branch: FoundAnchor["branch"] = "direct";
+        let parent: XmlEl | null = el.parentNode as XmlEl | null;
+        while (parent) {
+          const pName = parent.localName || parent.nodeName;
+          if (pName === "Choice") {
+            branch = "choice";
+            break;
+          }
+          if (pName === "Fallback") {
+            branch = "fallback";
+            break;
+          }
+          parent = parent.parentNode as XmlEl | null;
+        }
+        result.push({ anchor: el, branch });
+      }
+      result.push(...findAll(el));
+    }
+    return result;
+  }
+
+  const allFound = findAll(root);
+
+  // Step 2: Group by r:embed — each unique embed = one logical drawing
+  const byEmbed = new Map<string, FoundAnchor[]>();
+  for (const found of allFound) {
+    const embedId = getAnchorEmbedId(found.anchor);
+    if (!embedId) continue;
+    if (!byEmbed.has(embedId)) byEmbed.set(embedId, []);
+    byEmbed.get(embedId)!.push(found);
+  }
+
+  // Step 3: For each logical drawing, select the preferred anchor
+  const drawings: Array<{
+    embedId: string;
+    anchors: XmlEl[];
+    preferred: XmlEl;
+    index: number;
+  }> = [];
+  let idx = 0;
+  for (const [embedId, entries] of byEmbed) {
+    // Preference: Choice > direct > Fallback
+    const preferred =
+      entries.find((e) => e.branch === "choice")?.anchor ??
+      entries.find((e) => e.branch === "direct")?.anchor ??
+      entries.find((e) => e.branch === "fallback")?.anchor!;
+    drawings.push({
+      embedId,
+      anchors: entries.map((e) => e.anchor),
+      preferred,
+      index: idx++,
+    });
+  }
+
+  return drawings;
+}
+
 
 /** EMU per pixel (914400 EMU per inch / 96 px per inch). */
 const EMU_PER_PX = 9525;
@@ -203,18 +321,17 @@ export async function fixDrawingOverlaps(
     return emptyStats;
   }
   const root = doc.documentElement!;
-  const anchors = childElements(root).filter((el) => {
-    const n = el.localName || el.nodeName;
-    return n === "twoCellAnchor" || n === "oneCellAnchor";
-  });
-  if (anchors.length === 0) return emptyStats;
+  // Discover logical drawings — groups by r:embed, deduplicating
+  // mc:Choice + mc:Fallback that represent the same image.
+  const logicalDrawings = findLogicalDrawings(root);
+  if (logicalDrawings.length === 0) return emptyStats;
 
   const geom = new DrawingGeometry(sheet);
   const rects: AnchorRect[] = [];
-  for (let i = 0; i < anchors.length; i++) {
-    const r = geom.parseAnchor(anchors[i]);
+  for (const drawing of logicalDrawings) {
+    const r = geom.parseAnchor(drawing.preferred);
     if (r) {
-      r.index = i;
+      r.index = drawing.index;
       rects.push(r);
     }
   }
@@ -310,12 +427,13 @@ export async function fixDrawingOverlaps(
   debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
   // ── Write corrected positions back to the drawing XML ──
-  // updateAnchorRows uses scoped regex that matches each <from>...</from>
-  // block as a complete unit, preventing cross-anchor boundary corruption.
-  // Only <row>/<rowOff> values are modified — col/colOff and all other
-  // XML content are preserved byte-for-byte.
+  // Uses DOM-based mutation: modifies <row>/<rowOff> via DOM APIs on the
+  // SAME parsed document, then serializes. This correctly handles:
+  //   - mc:AlternateContent (updates both Choice and Fallback)
+  //   - No sequential index matching (DOM finds exact elements)
+  //   - No regex that could match across anchor boundaries
   if (stats.imagesRepositioned > 0) {
-    const modifiedXml = updateAnchorRows(originalXml, rects, geom);
+    const modifiedXml = updateAnchorsDom(doc, rects, logicalDrawings, geom);
     if (modifiedXml !== originalXml) {
       zip.file(drawingTarget, modifiedXml);
       debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget}`);
@@ -524,85 +642,103 @@ function spreadRects(rects: AnchorRect[]): number {
 }
 
 /**
- * Updates <row>/<rowOff> values in <from> and <to> blocks using scoped
- * replacement. Each block is matched independently, preventing cross-anchor
- * boundary corruption.
+ * Updates <row>/<rowOff> values using DOM-based mutation.
  *
- * Previous approaches failed because:
- * 1. xmldom re-serialization corrupts namespace prefixes → images lost
- * 2. Whole-XML regex with [\s\S]*? wildcards matches across anchor
- *    boundaries → corrupts specific drawings (drawing30.xml, drawing33.xml)
+ * For each logical drawing that needs repositioning:
+ *   1. Finds ALL anchor elements for that drawing (Choice + Fallback + direct)
+ *   2. For each anchor, finds <from> → <row>/<rowOff> and <to> → <row>/<rowOff>
+ *   3. Sets their text content via DOM APIs
+ *   4. Serializes the modified DOM back to XML
  *
- * This approach matches each <from>...</from> block as a complete unit,
- * then replaces values ONLY within that block.
+ * This approach:
+ *   - Correctly handles mc:AlternateContent (updates BOTH Choice and Fallback)
+ *   - Uses structural identity (r:embed) not sequential index matching
+ *   - Modifies only <row>/<rowOff> — all other XML content preserved
+ *   - No regex that could match across anchor boundaries
  */
-function updateAnchorRows(
-  xml: string,
+function updateAnchorsDom(
+  doc: XmlDoc,
   rects: AnchorRect[],
+  logicalDrawings: Array<{
+    embedId: string;
+    anchors: XmlEl[];
+    preferred: XmlEl;
+    index: number;
+  }>,
   geom: DrawingGeometry,
 ): string {
-  let result = xml;
+  // Build a map from logical drawing index to its rect
+  const rectByIndex = new Map<number, AnchorRect>();
+  for (const r of rects) rectByIndex.set(r.index, r);
 
-  // Phase 1: Update <from> blocks.
-  // Match each <from>...</from> as a complete unit.
-  let fromIdx = 0;
-  result = result.replace(
-    /<(\w+:)?from\b([^>]*)>([\s\S]*?)<\/(\w+:)?from>/g,
-    (fullMatch, _pfx1: string | undefined, _attrs: string, inner: string, _pfx2: string | undefined) => {
-      if (fromIdx >= rects.length) return fullMatch;
-      const r = rects[fromIdx];
-      fromIdx++;
-      if (r.newY1 === r.y1) return fullMatch; // not moved
+  // For each logical drawing that needs repositioning,
+  // update ALL its anchor elements (Choice + Fallback)
+  for (const drawing of logicalDrawings) {
+    const rect = rectByIndex.get(drawing.index);
+    if (!rect || rect.newY1 === rect.y1) continue; // not moved
 
-      const { row, off } = geom.yToRow(r.newY1);
-      const newOff = Math.max(0, Math.round(off));
+    // Calculate new row/rowOff for <from>
+    const fromPos = geom.yToRow(rect.newY1);
+    const fromRowOff = Math.max(0, Math.round(fromPos.off));
 
-      // Replace <row> within this <from> block only.
-      // CRITICAL: preserve the namespace prefix (e.g. xdr:) — stripping it corrupts the XML.
-      let updated = inner.replace(
-        /(<(\w+:)?row>)(\d+)(<\/(\w+:)?row>)/,
-        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${row}${close}`,
-      );
+    // Calculate new row/rowOff for <to>
+    const newY2 = rect.newY1 + rect.h;
+    const toPos = geom.yToRow(newY2);
+    const toRowOff = Math.max(0, Math.round(toPos.off));
 
-      // Replace <rowOff> within this <from> block only.
-      updated = updated.replace(
-        /(<(\w+:)?rowOff>)(\d+)(<\/(\w+:)?rowOff>)/,
-        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${newOff}${close}`,
-      );
+    // Update ALL anchor elements for this logical drawing
+    for (const anchorEl of drawing.anchors) {
+      updateAnchorElement(anchorEl, fromPos.row, fromRowOff, toPos.row, toRowOff);
+    }
+  }
 
-      return fullMatch.replace(inner, updated);
-    },
-  );
+  // Serialize the modified DOM back to XML
+  return serializeXml(doc.documentElement!);
+}
 
-  // Phase 2: Update <to> blocks (for twoCellAnchor).
-  let toIdx = 0;
-  result = result.replace(
-    /<(\w+:)?to\b([^>]*)>([\s\S]*?)<\/(\w+:)?to>/g,
-    (fullMatch, _pfx1: string | undefined, _attrs: string, inner: string, _pfx2: string | undefined) => {
-      if (toIdx >= rects.length) return fullMatch;
-      const r = rects[toIdx];
-      toIdx++;
-      if (r.newY1 === r.y1) return fullMatch; // not moved
+/**
+ * Updates the <row>/<rowOff> values within a single anchor element.
+ * Finds <from> and <to> children, then their <row>/<rowOff> children.
+ */
+function updateAnchorElement(
+  anchor: XmlEl,
+  fromRow: number,
+  fromRowOff: number,
+  toRow: number,
+  toRowOff: number,
+): void {
+  // Update <from> block
+  const from = firstChildElement(anchor, "from");
+  if (from) {
+    setChildText(from, "row", String(fromRow));
+    setChildText(from, "rowOff", String(fromRowOff));
+  }
 
-      const newY2 = r.newY1 + r.h;
-      const { row, off } = geom.yToRow(newY2);
-      const newOff = Math.max(0, Math.round(off));
+  // Update <to> block (only for twoCellAnchor)
+  const to = firstChildElement(anchor, "to");
+  if (to) {
+    setChildText(to, "row", String(toRow));
+    setChildText(to, "rowOff", String(toRowOff));
+  }
+}
 
-      let updated = inner.replace(
-        /(<(\w+:)?row>)(\d+)(<\/(\w+:)?row>)/,
-        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${row}${close}`,
-      );
-
-      updated = updated.replace(
-        /(<(\w+:)?rowOff>)(\d+)(<\/(\w+:)?rowOff>)/,
-        (_m, open: string, _np1: string | undefined, _num: string, close: string) => `${open}${newOff}${close}`,
-      );
-
-      return fullMatch.replace(inner, updated);
-    },
-  );
-
-  return result;
+/**
+ * Sets the text content of a child element within a parent.
+ * Handles namespace prefixes (e.g. <xdr:row> vs <row>).
+ */
+function setChildText(parent: XmlEl, localName: string, value: string): void {
+  for (let i = 0; i < parent.childNodes.length; i++) {
+    const child = parent.childNodes[i];
+    if (child.nodeType !== 1) continue;
+    const el = child as XmlEl;
+    const name = el.localName || el.nodeName;
+    if (name === localName) {
+      // Replace all child text nodes
+      while (el.firstChild) el.removeChild(el.firstChild);
+      el.appendChild(el.ownerDocument!.createTextNode(value));
+      return;
+    }
+  }
 }
 
 /**
