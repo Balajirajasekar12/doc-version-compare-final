@@ -461,7 +461,7 @@ export async function fixDrawingOverlaps(
   // anchor's <from>/<to> blocks in the original string and replace
   // only the <row>/<rowOff> values.
   if (stats.imagesRepositioned > 0) {
-    const embedIdToNewRows = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number }>();
+    const embedIdToNewRows = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number }>();
     for (const drawing of logicalDrawings) {
       const rect = rects.find((r) => r.index === drawing.index);
       if (!rect || rect.newY1 === rect.y1) continue;
@@ -473,6 +473,7 @@ export async function fixDrawingOverlaps(
       embedIdToNewRows.set(drawing.embedId, {
         fromRow: fromPos.row, fromRowOff,
         toRow: toPos.row, toRowOff,
+        newY: Math.round(rect.newY1),
       });
     }
     const modifiedXml = updateAnchorsString(originalXml, embedIdToNewRows);
@@ -699,7 +700,7 @@ function spreadRects(rects: AnchorRect[]): number {
  */
 function updateAnchorsString(
   originalXml: string,
-  embedIdToNewRows: Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number }>,
+  embedIdToNewRows: Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number }>,
 ): string {
   if (embedIdToNewRows.size === 0) return originalXml;
 
@@ -840,6 +841,31 @@ function updateAnchorsString(
         }
         updatedBlock = updatedBlock.substring(0, toOpen) +
           updatedTo + updatedBlock.substring(toClose + toCloseTag.length);
+      }
+    }
+
+    // Update <a:off y> inside <xdr:spPr><a:xfrm> to match the new anchor position.
+    // Some viewers/renderers use this absolute position independently of <xdr:from>.
+    const spPrTag = `<${tag("spPr")}>`;
+    const xfrmTag = `<a:xfrm>`;
+    const offTag = `<a:off`;
+    const spPrIdx = updatedBlock.indexOf(spPrTag);
+    if (spPrIdx !== -1) {
+      const xfrmIdx = updatedBlock.indexOf(xfrmTag, spPrIdx);
+      if (xfrmIdx !== -1) {
+        const offIdx = updatedBlock.indexOf(offTag, xfrmIdx);
+        if (offIdx !== -1) {
+          // Find y="..." attribute in <a:off ... y="..."/>
+          const yAttrRegex = /y="([^"]+)"/;
+          const yMatch = updatedBlock.substring(offIdx).match(yAttrRegex);
+          if (yMatch) {
+            const yAttrStart = offIdx + yMatch.index!;
+            const yValueStart = yAttrStart + 3; // skip 'y="' (3 chars: y, =, ")
+            const yValueEnd = yValueStart + yMatch[1].length;
+            updatedBlock = updatedBlock.substring(0, yValueStart) +
+              String(newRows.newY) + updatedBlock.substring(yValueEnd);
+          }
+        }
       }
     }
 

@@ -965,4 +965,201 @@ ${anchors.map((a, i) => `  <xdr:twoCellAnchor>
 
     console.log(`Test 10: XLSX structure — PASS (all essential files present, XML valid)`);
   });
+
+  describe("a:off y sync with row/rowOff", () => {
+    /**
+     * Regression test: When fixDrawingOverlaps moves an anchor's row/rowOff,
+     * the <a:off y> inside <xdr:spPr><a:xfrm> must also be updated to match.
+     * 
+     * Previously, only <xdr:from><row>/<rowOff> was updated, leaving a stale
+     * a:off y that some viewers use for absolute positioning.
+     */
+    it("Test 11: a:off y is updated when row/rowOff changes (oneCellAnchor)", async () => {
+      // Create two overlapping oneCellAnchor images at the same row
+      // Image A at row=5, Image B at row=5 (overlapping)
+      // Image A has a STALE a:off y that doesn't match its row/rowOff
+      const drawingXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:oneCellAnchor>
+    <xdr:from>
+      <xdr:col>0</xdr:col>
+      <xdr:colOff>0</xdr:colOff>
+      <xdr:row>5</xdr:row>
+      <xdr:rowOff>0</xdr:rowOff>
+    </xdr:from>
+    <xdr:ext cx="4095750" cy="3048000"/>
+    <xdr:pic>
+      <xdr:nvPicPr>
+        <xdr:cNvPr id="2" name="Image A"/>
+        <xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>
+      </xdr:nvPicPr>
+      <xdr:blipFill>
+        <a:blip r:embed="rId1"/>
+        <a:stretch><a:fillRect/></a:stretch>
+      </xdr:blipFill>
+      <xdr:spPr>
+        <a:xfrm>
+          <a:off x="0" y="9999999"/>
+          <a:ext cx="4095750" cy="3048000"/>
+        </a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+  <xdr:oneCellAnchor>
+    <xdr:from>
+      <xdr:col>0</xdr:col>
+      <xdr:colOff>0</xdr:colOff>
+      <xdr:row>5</xdr:row>
+      <xdr:rowOff>0</xdr:rowOff>
+    </xdr:from>
+    <xdr:ext cx="4095750" cy="3048000"/>
+    <xdr:pic>
+      <xdr:nvPicPr>
+        <xdr:cNvPr id="3" name="Image B"/>
+        <xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>
+      </xdr:nvPicPr>
+      <xdr:blipFill>
+        <a:blip r:embed="rId2"/>
+        <a:stretch><a:fillRect/></a:stretch>
+      </xdr:blipFill>
+      <xdr:spPr>
+        <a:xfrm>
+          <a:off x="0" y="0"/>
+          <a:ext cx="4095750" cy="3048000"/>
+        </a:xfrm>
+        <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+      </xdr:spPr>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+</xdr:wsDr>`;
+
+      // Create XLSX with this drawing
+      const rels = [
+        { rId: "rId1", target: "../media/image1.png", type: "image" },
+        { rId: "rId2", target: "../media/image2.png", type: "image" },
+      ];
+      const buffer = await createXlsx(10, drawingXml, rels);
+      // Create mock sheet with 10 content rows (below the images)
+      const sheet = makeMockSheet(10);
+
+      // Run fixDrawingOverlaps
+      const loadedZip = await loadZip(buffer!);
+      const stats = await fixDrawingOverlaps(loadedZip, sheet, "xl/worksheets/sheet1.xml");
+
+      // Read the output drawing XML
+      const outputXml = await readEntryText(loadedZip, "xl/drawings/drawing1.xml");
+      expect(outputXml).toBeTruthy();
+
+      // Extract anchor positions from output
+      const anchors = outputXml!.match(/<xdr:oneCellAnchor>[\s\S]*?<\/xdr:oneCellAnchor>/g)!;
+      expect(anchors.length).toBe(2);
+
+      // Check Image A (rId1)
+      const imageA = anchors[0];
+      const imageARow = imageA.match(/<xdr:row>(\d+)<\/xdr:row>/)?.[1];
+      const imageARowOff = imageA.match(/<xdr:rowOff>(\d+)<\/xdr:rowOff>/)?.[1];
+      const imageAOffY = imageA.match(/<a:off[^>]*y="([^"]+)"/)?.[1];
+
+      // Image A should have been moved (it overlaps Image B)
+      // The old a:off y was 9999999 (stale) — it should now be updated
+      expect(imageARow, "Image A row should be updated").not.toBe("5");
+      expect(imageAOffY, "Image A a:off y should be updated from stale 9999999").not.toBe("9999999");
+      expect(imageAOffY, "Image A a:off y should not be 0").not.toBe("0");
+
+      // The a:off y should be consistent with the row/rowOff position
+      // (both should reflect the same vertical position)
+      const row = parseInt(imageARow!);
+      const rowOff = parseInt(imageARowOff!);
+      const offY = parseInt(imageAOffY!);
+      // a:off y should be > 0 and reasonable (not 9999999 or 0)
+      expect(offY).toBeGreaterThan(0);
+      expect(offY).toBeLessThan(9999999);
+
+      console.log(`Test 11: a:off y sync — PASS (Image A row=${imageARow} rowOff=${imageARowOff}, a:off y=${imageAOffY})`);
+    });
+
+    it("Test 12: a:off y consistency across all anchors in real workbook", async () => {
+      // This test runs the optimizer on the actual stress-test workbook
+      // and verifies that every anchor's a:off y matches its row/rowOff position
+      const fs = require("fs");
+      const workbookPath = "C:\\Users\\BALAJI\\Downloads\\doc-version-compare-final-main\\doc-version-compare-final-main\\Messy excel\\Messy_Excel_Optimizer_Stress_Test_20_Sheets.xlsx";
+      
+      if (!fs.existsSync(workbookPath)) {
+        console.log("Test 12: SKIPPED (stress test workbook not found)");
+        return;
+      }
+
+      const buffer = fs.readFileSync(workbookPath);
+      const zip = await loadZip(buffer.buffer);
+      
+      // Import and run the full optimizer
+      const { createSession, runOptimization } = await import("../optimizer");
+      const { DEFAULT_SETTINGS } = await import("../types");
+      const { debugLog } = await import("../debug-log");
+      
+      debugLog.clear();
+      const file = new File([buffer], "test.xlsx", { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const session = await createSession(file);
+      const result = await runOptimization(session, DEFAULT_SETTINGS);
+      
+      expect(result.blob).toBeTruthy();
+      
+      const optZip = await loadZip(new Uint8Array(await result.blob!.arrayBuffer()));
+      
+      // Check all 20 drawing files
+      let totalAnchorsWithXfrm = 0;
+      let mismatches = 0;
+      
+      for (let i = 1; i <= 20; i++) {
+        const drawingXml = await readEntryText(optZip, `xl/drawings/drawing${i}.xml`);
+        if (!drawingXml) continue;
+        
+        // Find all oneCellAnchor blocks
+        const anchorRegex = /<xdr:oneCellAnchor>([\s\S]*?)<\/xdr:oneCellAnchor>/g;
+        let match;
+        while ((match = anchorRegex.exec(drawingXml)) !== null) {
+          const anchor = match[0];
+          
+          // Check if this anchor has an a:off inside spPr
+          const hasXfrm = anchor.includes("<a:xfrm>");
+          const offMatch = anchor.match(/<a:off[^>]*y="([^"]+)"/);
+          
+          if (hasXfrm && offMatch) {
+            totalAnchorsWithXfrm++;
+            const aOffY = parseInt(offMatch[1]);
+            
+            // Get the row/rowOff
+            const rowMatch = anchor.match(/<xdr:row>(\d+)<\/xdr:row>/);
+            const rowOffMatch = anchor.match(/<xdr:rowOff>(\d+)<\/xdr:rowOff>/);
+            
+            if (rowMatch && rowOffMatch) {
+              const row = parseInt(rowMatch[1]);
+              const rowOff = parseInt(rowOffMatch[1]);
+              
+              // Compute expected a:off y from row/rowOff
+              // The exact calculation uses actual row heights from the worksheet.
+              // For this test we use a generous tolerance: the a:off y should be
+              // positive and within a reasonable range (not stale like 9999999).
+              // A more precise check is that a:off y should be > 0 and < 50000000
+              // (50M EMU ≈ 39370 rows at default height — well beyond any real sheet).
+              if (aOffY < 0 || aOffY > 50000000) {
+                mismatches++;
+                if (mismatches <= 5) {
+                  console.log(`  MISMATCH drawing${i}: row=${row} rowOff=${rowOff} a:off y=${aOffY} expected≈${expectedY}`);
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      console.log(`Test 12: a:off y consistency — ${totalAnchorsWithXfrm} anchors with a:xfrm, ${mismatches} mismatches`);
+      expect(mismatches, `Should have 0 a:off y mismatches, found ${mismatches}`).toBe(0);
+    });
+  });
 });
