@@ -27,7 +27,6 @@ import {
   firstChildElement,
   getAttr,
   parseXml,
-  serializeXml,
   textContent,
 } from "./xml";
 import { ParsedSheet } from "./worksheet";
@@ -427,16 +426,30 @@ export async function fixDrawingOverlaps(
   debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
   // ── Write corrected positions back to the drawing XML ──
-  // Uses DOM-based mutation: modifies <row>/<rowOff> via DOM APIs on the
-  // SAME parsed document, then serializes. This correctly handles:
-  //   - mc:AlternateContent (updates both Choice and Fallback)
-  //   - No sequential index matching (DOM finds exact elements)
-  //   - No regex that could match across anchor boundaries
+  // Uses STRING-based modification on the original XML.
+  // DOM re-serialization (serializeXml) produces subtly different XML
+  // that Excel rejects — so we never serialize. Instead, we find each
+  // anchor's <from>/<to> blocks in the original string and replace
+  // only the <row>/<rowOff> values.
   if (stats.imagesRepositioned > 0) {
-    const modifiedXml = updateAnchorsDom(doc, rects, logicalDrawings, geom);
+    const embedIdToNewRows = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number }>();
+    for (const drawing of logicalDrawings) {
+      const rect = rects.find((r) => r.index === drawing.index);
+      if (!rect || rect.newY1 === rect.y1) continue;
+      const fromPos = geom.yToRow(rect.newY1);
+      const fromRowOff = Math.max(0, Math.round(fromPos.off));
+      const newY2 = rect.newY1 + rect.h;
+      const toPos = geom.yToRow(newY2);
+      const toRowOff = Math.max(0, Math.round(toPos.off));
+      embedIdToNewRows.set(drawing.embedId, {
+        fromRow: fromPos.row, fromRowOff,
+        toRow: toPos.row, toRowOff,
+      });
+    }
+    const modifiedXml = updateAnchorsString(originalXml, embedIdToNewRows);
     if (modifiedXml !== originalXml) {
       zip.file(drawingTarget, modifiedXml);
-      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget}`);
+      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget} (string-based, ${embedIdToNewRows.size} anchors updated)`);
     }
   }
 
@@ -642,103 +655,146 @@ function spreadRects(rects: AnchorRect[]): number {
 }
 
 /**
- * Updates <row>/<rowOff> values using DOM-based mutation.
+ * Updates <row>/<rowOff> values using STRING-based replacement on the
+ * original XML. This avoids DOM re-serialization which corrupts the XML.
  *
- * For each logical drawing that needs repositioning:
- *   1. Finds ALL anchor elements for that drawing (Choice + Fallback + direct)
- *   2. For each anchor, finds <from> → <row>/<rowOff> and <to> → <row>/<rowOff>
- *   3. Sets their text content via DOM APIs
- *   4. Serializes the modified DOM back to XML
+ * For each anchor identified by its r:embed ID:
+ *   1. Finds the anchor block in the original XML string
+ *   2. Extracts the <from>...</from> block
+ *   3. Replaces <row>/<rowOff> values within it using regex
+ *   4. Does the same for <to>...</to> if present
+ *   5. Writes back the modified string (never re-serializes)
  *
- * This approach:
- *   - Correctly handles mc:AlternateContent (updates BOTH Choice and Fallback)
- *   - Uses structural identity (r:embed) not sequential index matching
- *   - Modifies only <row>/<rowOff> — all other XML content preserved
- *   - No regex that could match across anchor boundaries
+ * This approach preserves the original XML byte-for-byte except for
+ * the specific row/rowOff values that need to change.
  */
-function updateAnchorsDom(
-  doc: XmlDoc,
-  rects: AnchorRect[],
-  logicalDrawings: Array<{
-    embedId: string;
-    anchors: XmlEl[];
-    preferred: XmlEl;
-    index: number;
-  }>,
-  geom: DrawingGeometry,
+function updateAnchorsString(
+  originalXml: string,
+  embedIdToNewRows: Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number }>,
 ): string {
-  // Build a map from logical drawing index to its rect
-  const rectByIndex = new Map<number, AnchorRect>();
-  for (const r of rects) rectByIndex.set(r.index, r);
+  if (embedIdToNewRows.size === 0) return originalXml;
 
-  // For each logical drawing that needs repositioning,
-  // update ALL its anchor elements (Choice + Fallback)
-  for (const drawing of logicalDrawings) {
-    const rect = rectByIndex.get(drawing.index);
-    if (!rect || rect.newY1 === rect.y1) continue; // not moved
+  // Detect the namespace prefix used for drawing elements (xdr:, a:, or none).
+  let pfx = "xdr:";
+  if (/<a:from>|<a:row>/i.test(originalXml)) pfx = "a:";
+  else if (/<from>|<row>/i.test(originalXml)) pfx = "";
 
-    // Calculate new row/rowOff for <from>
-    const fromPos = geom.yToRow(rect.newY1);
-    const fromRowOff = Math.max(0, Math.round(fromPos.off));
+  // Helper to build a tag name with the detected prefix.
+  const tag = (name: string) => pfx ? `${pfx}${name}` : name;
 
-    // Calculate new row/rowOff for <to>
-    const newY2 = rect.newY1 + rect.h;
-    const toPos = geom.yToRow(newY2);
-    const toRowOff = Math.max(0, Math.round(toPos.off));
+  let result = originalXml;
+  let anchorsUpdated = 0;
 
-    // Update ALL anchor elements for this logical drawing
-    for (const anchorEl of drawing.anchors) {
-      updateAnchorElement(anchorEl, fromPos.row, fromRowOff, toPos.row, toRowOff);
+  // For each embed ID that needs updating, find and modify all matching anchors.
+  for (const [embedId, newRows] of embedIdToNewRows) {
+    // Find ALL anchor blocks containing this embed ID.
+    let safety = 0;
+    while (safety < 100) {
+      safety++;
+      const embedIdx = result.indexOf(`r:embed="${embedId}"`);
+      if (embedIdx === -1) break;
+
+      // Find anchor opening tag (search backward from embed position).
+      const beforeEmbed = result.substring(0, embedIdx);
+      const twoAnchorOpen = beforeEmbed.lastIndexOf(`<${tag("twoCellAnchor")}`);
+      const oneAnchorOpen = beforeEmbed.lastIndexOf(`<${tag("oneCellAnchor")}`);
+      const anchorOpen = Math.max(twoAnchorOpen, oneAnchorOpen);
+      if (anchorOpen === -1) break;
+
+      // Find anchor closing tag.
+      const isTwoCell = twoAnchorOpen > oneAnchorOpen;
+      const closeTag = isTwoCell ? `</${tag("twoCellAnchor")}>` : `</${tag("oneCellAnchor")}>`;
+      const anchorClose = result.indexOf(closeTag, anchorOpen);
+      if (anchorClose === -1) break;
+
+      const anchorBlock = result.substring(anchorOpen, anchorClose + closeTag.length);
+
+      // Extract and update the <from> block.
+      const fromOpenTag = `<${tag("from")}>`;
+      const fromCloseTag = `</${tag("from")}>`;
+      const fromOpen = anchorBlock.indexOf(fromOpenTag);
+      const fromClose = anchorBlock.indexOf(fromCloseTag, fromOpen);
+      if (fromOpen !== -1 && fromClose !== -1) {
+        const fromBlock = anchorBlock.substring(fromOpen, fromClose + fromCloseTag.length);
+        // Replace <row>/<rowOff> values within this specific <from> block only.
+        const rowOpen = `<${tag("row")}>`;
+        const rowClose = `</${tag("row")}>`;
+        const rowOffOpen = `<${tag("rowOff")}>`;
+        const rowOffClose = `</${tag("rowOff")}>`;
+        let updatedFromBlock = fromBlock;
+        const rowIdx = updatedFromBlock.indexOf(rowOpen);
+        if (rowIdx !== -1) {
+          const rowEnd = updatedFromBlock.indexOf(rowClose, rowIdx);
+          if (rowEnd !== -1) {
+            updatedFromBlock = updatedFromBlock.substring(0, rowIdx + rowOpen.length) +
+              String(newRows.fromRow) +
+              updatedFromBlock.substring(rowEnd);
+          }
+        }
+        const rowOffIdx = updatedFromBlock.indexOf(rowOffOpen);
+        if (rowOffIdx !== -1) {
+          const rowOffEnd = updatedFromBlock.indexOf(rowOffClose, rowOffIdx);
+          if (rowOffEnd !== -1) {
+            updatedFromBlock = updatedFromBlock.substring(0, rowOffIdx + rowOffOpen.length) +
+              String(newRows.fromRowOff) +
+              updatedFromBlock.substring(rowOffEnd);
+          }
+        }
+        result =
+          result.substring(0, anchorOpen) +
+          anchorBlock.substring(0, fromOpen) +
+          updatedFromBlock +
+          anchorBlock.substring(fromClose + fromCloseTag.length) +
+          result.substring(anchorClose + closeTag.length);
+        anchorsUpdated++;
+      }
+
+      // Extract and update the <to> block (only for twoCellAnchor).
+      if (isTwoCell) {
+        // Re-extract anchorBlock since result may have changed.
+        const updatedAnchorBlock = result.substring(anchorOpen, anchorClose + closeTag.length);
+        const toOpenTag = `<${tag("to")}>`;
+        const toCloseTag = `</${tag("to")}>`;
+        const toOpen = updatedAnchorBlock.indexOf(toOpenTag);
+        const toClose = updatedAnchorBlock.indexOf(toCloseTag, toOpen);
+        if (toOpen !== -1 && toClose !== -1) {
+          const toBlock = updatedAnchorBlock.substring(toOpen, toClose + toCloseTag.length);
+          let updatedToBlock = toBlock;
+          const rowOpen = `<${tag("row")}>`;
+          const rowClose = `</${tag("row")}>`;
+          const rowOffOpen = `<${tag("rowOff")}>`;
+          const rowOffClose = `</${tag("rowOff")}>`;
+          const rowIdx = updatedToBlock.indexOf(rowOpen);
+          if (rowIdx !== -1) {
+            const rowEnd = updatedToBlock.indexOf(rowClose, rowIdx);
+            if (rowEnd !== -1) {
+              updatedToBlock = updatedToBlock.substring(0, rowIdx + rowOpen.length) +
+                String(newRows.toRow) +
+                updatedToBlock.substring(rowEnd);
+            }
+          }
+          const rowOffIdx = updatedToBlock.indexOf(rowOffOpen);
+          if (rowOffIdx !== -1) {
+            const rowOffEnd = updatedToBlock.indexOf(rowOffClose, rowOffIdx);
+            if (rowOffEnd !== -1) {
+              updatedToBlock = updatedToBlock.substring(0, rowOffIdx + rowOffOpen.length) +
+                String(newRows.toRowOff) +
+                updatedToBlock.substring(rowOffEnd);
+            }
+          }
+          result =
+            result.substring(0, anchorOpen) +
+            updatedAnchorBlock.substring(0, toOpen) +
+            updatedToBlock +
+            updatedAnchorBlock.substring(toClose + toCloseTag.length) +
+            result.substring(anchorClose + closeTag.length);
+        }
+      }
     }
   }
 
-  // Serialize the modified DOM back to XML
-  return serializeXml(doc.documentElement!);
-}
-
-/**
- * Updates the <row>/<rowOff> values within a single anchor element.
- * Finds <from> and <to> children, then their <row>/<rowOff> children.
- */
-function updateAnchorElement(
-  anchor: XmlEl,
-  fromRow: number,
-  fromRowOff: number,
-  toRow: number,
-  toRowOff: number,
-): void {
-  // Update <from> block
-  const from = firstChildElement(anchor, "from");
-  if (from) {
-    setChildText(from, "row", String(fromRow));
-    setChildText(from, "rowOff", String(fromRowOff));
-  }
-
-  // Update <to> block (only for twoCellAnchor)
-  const to = firstChildElement(anchor, "to");
-  if (to) {
-    setChildText(to, "row", String(toRow));
-    setChildText(to, "rowOff", String(toRowOff));
-  }
-}
-
-/**
- * Sets the text content of a child element within a parent.
- * Handles namespace prefixes (e.g. <xdr:row> vs <row>).
- */
-function setChildText(parent: XmlEl, localName: string, value: string): void {
-  for (let i = 0; i < parent.childNodes.length; i++) {
-    const child = parent.childNodes[i];
-    if (child.nodeType !== 1) continue;
-    const el = child as XmlEl;
-    const name = el.localName || el.nodeName;
-    if (name === localName) {
-      // Replace all child text nodes
-      while (el.firstChild) el.removeChild(el.firstChild);
-      el.appendChild(el.ownerDocument!.createTextNode(value));
-      return;
-    }
-  }
+  debugLog.log("DRAWING", `  updateAnchorsString: ${anchorsUpdated} anchor blocks updated (prefix="${pfx || '(none)'}")`);
+  return result;
 }
 
 /**
