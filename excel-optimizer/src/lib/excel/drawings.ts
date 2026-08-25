@@ -309,18 +309,18 @@ export async function fixDrawingOverlaps(
 
   debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
-  // DO NOT rewrite the drawing XML using regex or xmldom serialization.
-  // Every approach tested (xmldom re-serialization, whole-XML regex,
-  // scoped block replacement with namespace preservation) has corrupted
-  // real-world OOXML drawing XML in ways that:
-  // 1. Pass xmldom validation (too lenient)
-  // 2. But FAIL Excel's stricter OOXML parser
-  // 3. Causing "Repaired Records: Drawing" and image loss
-  //
-  // The detection/reporting above is retained for the optimization report.
-  // The drawing part is passed through byte-for-byte unchanged.
-  // Image repositioning requires an OOXML-aware library (e.g. ExcelJS)
-  // that handles namespace-aware serialization correctly.
+  // ── Write corrected positions back to the drawing XML ──
+  // updateAnchorRows uses scoped regex that matches each <from>...</from>
+  // block as a complete unit, preventing cross-anchor boundary corruption.
+  // Only <row>/<rowOff> values are modified — col/colOff and all other
+  // XML content are preserved byte-for-byte.
+  if (stats.imagesRepositioned > 0) {
+    const modifiedXml = updateAnchorRows(originalXml, rects, geom);
+    if (modifiedXml !== originalXml) {
+      zip.file(drawingTarget, modifiedXml);
+      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget}`);
+    }
+  }
 
   return stats;
 }
@@ -345,9 +345,11 @@ function countOverlaps(rects: AnchorRect[]): number {
 
 /**
  * Counts images whose bounding box overlaps with the content boundary.
+ * Uses newY1 (the position after repositioning) so the 'after' count
+ * reflects the actual final state.
  */
 function countContentConflicts(rects: AnchorRect[], contentBoundaryY: number): number {
-  return rects.filter((r) => r.y1 < contentBoundaryY).length;
+  return rects.filter((r) => r.newY1 < contentBoundaryY).length;
 }
 
 /**
