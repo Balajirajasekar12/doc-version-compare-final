@@ -665,20 +665,20 @@ function groupAndArrange(
  */
 function spreadRects(rects: AnchorRect[]): number {
   const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
-  const placed: { x1: number; y1: number; x2: number; y2: number }[] = [];
+  const placed: AnchorRect[] = [];
   let moved = 0;
   for (const r of ordered) {
     let y = r.newY1;
     for (;;) {
       const blockers = placed.filter(
-        (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.y1 < y + r.h && p.y2 > y,
+        (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.newY1 < y + r.h && p.newY1 + p.h > y,
       );
       if (blockers.length === 0) break;
-      y = Math.max(...blockers.map((p) => p.y2)) + SPACING_PX * EMU_PER_PX;
+      y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
     }
     if (y !== r.y1) moved++;
     r.newY1 = y;
-    placed.push({ x1: r.x1, y1: y, x2: r.x2, y2: y + r.h });
+    placed.push(r);
   }
   return moved;
 }
