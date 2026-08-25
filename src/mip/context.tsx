@@ -64,6 +64,7 @@ type MipAction =
   | { type: "ADD_ANALYSES"; payload: AnalysisResult[] }
   | { type: "LOAD_FINDINGS"; payload: Finding[] }
   | { type: "ADD_FINDING"; payload: Finding }
+  | { type: "ADD_FINDINGS"; payload: Finding[] }
   | { type: "UPDATE_FINDING"; payload: Finding }
   | { type: "REMOVE_FINDING"; payload: string }
   | { type: "LOAD_RULES"; payload: BusinessRule[] }
@@ -72,8 +73,10 @@ type MipAction =
   | { type: "REMOVE_RULE"; payload: string }
   | { type: "LOAD_KNOWLEDGE"; payload: KnowledgeEntry[] }
   | { type: "ADD_KNOWLEDGE"; payload: KnowledgeEntry }
+  | { type: "ADD_KNOWLEDGES"; payload: KnowledgeEntry[] }
   | { type: "LOAD_EVIDENCE_REQUESTS"; payload: EvidenceRequest[] }
   | { type: "ADD_EVIDENCE_REQUEST"; payload: EvidenceRequest }
+  | { type: "ADD_EVIDENCE_REQUESTS"; payload: EvidenceRequest[] }
   | { type: "UPDATE_EVIDENCE_REQUEST"; payload: EvidenceRequest }
   | { type: "LOAD_SCENARIOS"; payload: TestScenario[] }
   | { type: "ADD_SCENARIO"; payload: TestScenario }
@@ -112,6 +115,7 @@ function reducer(state: MipState, action: MipAction): MipState {
     case "ADD_ANALYSES": return { ...state, analyses: [...state.analyses, ...action.payload] };
     case "LOAD_FINDINGS": return { ...state, findings: action.payload };
     case "ADD_FINDING": return { ...state, findings: [...state.findings, action.payload] };
+    case "ADD_FINDINGS": return { ...state, findings: [...state.findings, ...action.payload] };
     case "UPDATE_FINDING": return { ...state, findings: state.findings.map(f => f.id === action.payload.id ? action.payload : f) };
     case "REMOVE_FINDING": return { ...state, findings: state.findings.filter(f => f.id !== action.payload) };
     case "LOAD_RULES": return { ...state, rules: action.payload };
@@ -120,8 +124,10 @@ function reducer(state: MipState, action: MipAction): MipState {
     case "REMOVE_RULE": return { ...state, rules: state.rules.filter(r => r.id !== action.payload) };
     case "LOAD_KNOWLEDGE": return { ...state, knowledge: action.payload };
     case "ADD_KNOWLEDGE": return { ...state, knowledge: [...state.knowledge, action.payload] };
+    case "ADD_KNOWLEDGES": return { ...state, knowledge: [...state.knowledge, ...action.payload] };
     case "LOAD_EVIDENCE_REQUESTS": return { ...state, evidenceRequests: action.payload };
     case "ADD_EVIDENCE_REQUEST": return { ...state, evidenceRequests: [...state.evidenceRequests, action.payload] };
+    case "ADD_EVIDENCE_REQUESTS": return { ...state, evidenceRequests: [...state.evidenceRequests, ...action.payload] };
     case "UPDATE_EVIDENCE_REQUEST": return { ...state, evidenceRequests: state.evidenceRequests.map(e => e.id === action.payload.id ? action.payload : e) };
     case "LOAD_SCENARIOS": return { ...state, scenarios: action.payload };
     case "ADD_SCENARIO": return { ...state, scenarios: [...state.scenarios, action.payload] };
@@ -277,8 +283,8 @@ export function MipProvider({ children }: { children: React.ReactNode }) {
       modernLabel: "Modern",
       freezeHistory: [],
       settings: {
-        legacyExtensions: [".java", ".sql", ".pls", ".pkb", ".pks", ".json", ".xml", ".sh", ".ejb"],
-        modernExtensions: [".java", ".json", ".xml", ".sh"],
+        legacyExtensions: [".java", ".sql", ".pls", ".pkb", ".pks", ".json", ".xml", ".sh", ".ejb", ".cob", ".cbl", ".copy", ".cpy", ".inc", ".pli", ".pl1", ".rpg", ".rpgle", ".asm", ".jcl", ".f", ".f90", ".c", ".cpp"],
+        modernExtensions: [".java", ".json", ".xml", ".sh", ".ts", ".js", ".py", ".go", ".rs", ".kt", ".scala", ".cs", ".yml", ".yaml"],
         analysisDepth: "detailed",
       },
     };
@@ -313,7 +319,7 @@ export function MipProvider({ children }: { children: React.ReactNode }) {
           if (zipEntry.dir) continue;
           // Only process supported text files
           const ext = path.split(".").pop()?.toLowerCase() || "";
-          const supportedExts = ["java", "sql", "pls", "pkb", "pks", "json", "xml", "sh", "ejb", "txt", "py", "ts", "js", "properties", "yml", "yaml", "cfg", "conf", "ini"];
+          const supportedExts = ["java", "sql", "pls", "pkb", "pks", "json", "xml", "sh", "ejb", "txt", "py", "ts", "js", "properties", "yml", "yaml", "cfg", "conf", "ini", "cob", "cbl", "copy", "cpy", "inc", "pli", "pl1", "rpg", "rpgle", "asm", "s", "f", "f90", "f95", "c", "cpp", "cs", "go", "rs", "kt", "scala", "nsn", "nsl", "ads", "jcl", "prg", "src", "out", "lst", "map", "csv", "log", "md", "html", "css", "xsd", "wsdl", "xsl", "xslt", "sqlldr", "ctl", "par", "def", "res"];
           if (!supportedExts.includes(ext)) continue;
 
           try {
@@ -366,12 +372,12 @@ export function MipProvider({ children }: { children: React.ReactNode }) {
     const projectId = state.currentProjectId;
     if (!projectId) return;
 
-    const { analyzeSourceFile } = await import("./analyzer");
+    const { analyzeSourceFile, compareLegacyModern } = await import("./analyzer");
     const files = state.sourceFiles;
     const results: AnalysisResult[] = [];
 
+    // Step 1: Analyze each file
     for (const file of files) {
-      if (file.status === "analyzed") continue;
       dispatch({ type: "UPDATE_SOURCE_FILE", payload: { ...file, status: "analyzing" } });
 
       try {
@@ -384,9 +390,57 @@ export function MipProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
+    // Save analysis results
     await db.analysisDB.saveAll(results);
     dispatch({ type: "ADD_ANALYSES", payload: results });
-  }, [state.currentProjectId, state.sourceFiles]);
+
+    // Step 2: Run comparison between Legacy and Modern
+    const legacyAnalyses = results.filter(r => r.side === "legacy");
+    const modernAnalyses = results.filter(r => r.side === "modern");
+    const legacyFiles = files.filter(f => f.side === "legacy");
+    const modernFiles = files.filter(f => f.side === "modern");
+
+    if (legacyAnalyses.length > 0 && modernAnalyses.length > 0) {
+      // Clear old findings, evidence requests, and knowledge for this project before regenerating
+      const oldFindings = state.findings.filter(f => f.projectId === projectId);
+      for (const f of oldFindings) {
+        await db.findingDB.remove(f.id);
+      }
+      dispatch({ type: "LOAD_FINDINGS", payload: [] });
+
+      const oldEvReqs = state.evidenceRequests.filter(e => e.projectId === projectId);
+      for (const e of oldEvReqs) {
+        await db.evidenceRequestDB.remove(e.id);
+      }
+      dispatch({ type: "LOAD_EVIDENCE_REQUESTS", payload: [] });
+
+      const comparison = compareLegacyModern(
+        legacyAnalyses,
+        modernAnalyses,
+        legacyFiles,
+        modernFiles,
+        projectId,
+      );
+
+      // Save findings with business explanations
+      for (const finding of comparison.findings) {
+        await db.findingDB.save(finding);
+      }
+      dispatch({ type: "ADD_FINDINGS", payload: comparison.findings });
+
+      // Save evidence requests
+      for (const req of comparison.evidenceRequests) {
+        await db.evidenceRequestDB.save(req);
+      }
+      dispatch({ type: "ADD_EVIDENCE_REQUESTS", payload: comparison.evidenceRequests });
+
+      // Save knowledge entries
+      for (const entry of comparison.knowledgeEntries) {
+        await db.knowledgeDB.save(entry);
+      }
+      dispatch({ type: "ADD_KNOWLEDGES", payload: comparison.knowledgeEntries });
+    }
+  }, [state.currentProjectId, state.sourceFiles, state.findings, state.evidenceRequests]);
 
   // --- Findings ---
   const addFinding = useCallback(async (finding: Omit<Finding, "id" | "createdAt" | "updatedAt">): Promise<Finding> => {
@@ -614,6 +668,38 @@ function detectLanguage(filename: string): string {
     ".sh": "Shell",
     ".bash": "Shell",
     ".ejb": "Java",
+    ".cob": "COBOL",
+    ".cbl": "COBOL",
+    ".copy": "COBOL Copybook",
+    ".cpy": "COBOL Copybook",
+    ".inc": "Include",
+    ".pli": "PL/I",
+    ".pl1": "PL/I",
+    ".rpg": "RPG",
+    ".rpgle": "RPG",
+    ".asm": "Assembly",
+    ".s": "Assembly",
+    ".f": "Fortran",
+    ".f90": "Fortran",
+    ".f95": "Fortran",
+    ".c": "C",
+    ".cpp": "C++",
+    ".cs": "C#",
+    ".go": "Go",
+    ".rs": "Rust",
+    ".kt": "Kotlin",
+    ".scala": "Scala",
+    ".nsn": "Natural",
+    ".nsl": "Natural",
+    ".ads": "Ada",
+    ".jcl": "JCL",
+    ".prg": "Program",
+    ".src": "Source",
+    ".out": "Output",
+    ".lst": "Listing",
+    ".map": "Map",
+    ".csv": "CSV",
+    ".log": "Log",
     ".py": "Python",
     ".ts": "TypeScript",
     ".js": "JavaScript",
@@ -624,7 +710,6 @@ function detectLanguage(filename: string): string {
     ".conf": "Config",
     ".ini": "Config",
     ".txt": "Text",
-    ".csv": "CSV",
   };
   return map[ext] || "Unknown";
 }

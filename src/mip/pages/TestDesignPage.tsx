@@ -9,7 +9,7 @@ import { TestTubeDiagonal, Plus, Link2, AlertTriangle, BookOpen } from "lucide-r
 export default function TestDesignPage() {
   const { state, addScenario } = useMip();
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState<{ title: string; description: string; objective: string; expectedOutcome: string; priority: "critical" | "high" | "medium" | "low" }>({ title: "", description: "", objective: "", expectedOutcome: "", priority: "medium" });
+  const [form, setForm] = useState<{ title: string; description: string; objective: string; expectedOutcome: string; priority: "critical" | "high" | "medium" | "low"; linkedRuleIds: string[]; linkedFindingIds: string[] }>({ title: "", description: "", objective: "", expectedOutcome: "", priority: "medium", linkedRuleIds: [], linkedFindingIds: [] });
 
   const handleAdd = async () => {
     if (!form.title.trim()) return;
@@ -20,11 +20,11 @@ export default function TestDesignPage() {
       objective: form.objective,
       expectedOutcome: form.expectedOutcome,
       priority: form.priority,
-      linkedRuleIds: [],
-      linkedFindingIds: [],
+      linkedRuleIds: form.linkedRuleIds,
+      linkedFindingIds: form.linkedFindingIds,
       linkedSourceFileIds: state.sourceFiles.map(f => f.id),
     });
-    setForm({ title: "", description: "", objective: "", expectedOutcome: "", priority: "medium" });
+    setForm({ title: "", description: "", objective: "", expectedOutcome: "", priority: "medium", linkedRuleIds: [], linkedFindingIds: [] });
     setShowAdd(false);
   };
 
@@ -61,6 +61,39 @@ export default function TestDesignPage() {
             className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder-slate-500 outline-none resize-none" />
           <input value={form.expectedOutcome} onChange={e => setForm({...form, expectedOutcome: e.target.value})} placeholder="Expected outcome"
             className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white placeholder-slate-500 outline-none" />
+          {/* Link Rules */}
+          {state.rules.length > 0 && (
+            <div>
+              <span className="text-[10px] font-medium text-slate-500">Link Business Rules</span>
+              <div className="mt-1 max-h-24 space-y-0.5 overflow-y-auto">
+                {state.rules.map(r => (
+                  <label key={r.id} className="flex items-center gap-2 rounded-lg bg-white/[0.02] px-2 py-1 text-[11px] cursor-pointer hover:bg-white/[0.04]">
+                    <input type="checkbox" checked={form.linkedRuleIds.includes(r.id)}
+                      onChange={() => setForm(f => ({...f, linkedRuleIds: f.linkedRuleIds.includes(r.id) ? f.linkedRuleIds.filter(id => id !== r.id) : [...f.linkedRuleIds, r.id]}))}
+                      className="rounded border-white/20 bg-white/[0.03]" />
+                    <span className="font-mono text-cyan-300">{r.ruleNumber}</span>
+                    <span className="text-slate-400">{r.title}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+          {/* Link Findings */}
+          {state.findings.length > 0 && (
+            <div>
+              <span className="text-[10px] font-medium text-slate-500">Link Findings</span>
+              <div className="mt-1 max-h-24 space-y-0.5 overflow-y-auto">
+                {state.findings.map(f => (
+                  <label key={f.id} className="flex items-center gap-2 rounded-lg bg-white/[0.02] px-2 py-1 text-[11px] cursor-pointer hover:bg-white/[0.04]">
+                    <input type="checkbox" checked={form.linkedFindingIds.includes(f.id)}
+                      onChange={() => setForm(prev => ({...prev, linkedFindingIds: prev.linkedFindingIds.includes(f.id) ? prev.linkedFindingIds.filter(id => id !== f.id) : [...prev.linkedFindingIds, f.id]}))}
+                      className="rounded border-white/20 bg-white/[0.03]" />
+                    <span className="text-slate-400">{f.title.slice(0, 60)}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="flex justify-end gap-2">
             <button onClick={() => setShowAdd(false)} className="rounded-lg px-3 py-1.5 text-xs text-slate-400">Cancel</button>
             <button onClick={handleAdd} disabled={!form.title.trim()} className="rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-medium text-[#07090d] disabled:opacity-50">Save Scenario</button>

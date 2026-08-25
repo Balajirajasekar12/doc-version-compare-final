@@ -32,6 +32,7 @@ import {
   Download,
   Upload as UploadIcon,
   Loader2,
+  FileText,
 } from "lucide-react";
 
 // --- Lazy page imports ---
@@ -54,6 +55,7 @@ const MipExecution = React.lazy(() => import("./pages/ExecutionPage.tsx"));
 const MipEvidence = React.lazy(() => import("./pages/EvidencePage.tsx"));
 const MipReports = React.lazy(() => import("./pages/ReportsPage.tsx"));
 const MipSettings = React.lazy(() => import("./pages/SettingsPage.tsx"));
+const MipTestCaseGen = React.lazy(() => import("./pages/TestCaseGeneratorPage.tsx"));
 
 function renderPage(pathname: string) {
   // Strip /mip prefix if present (HashRouter basename)
@@ -98,6 +100,8 @@ function renderPage(pathname: string) {
       return <MipReports />;
     case "/settings":
       return <MipSettings />;
+    case "/test-case-generator":
+      return <MipTestCaseGen />;
     default:
       return <MipLanding />;
   }
@@ -115,6 +119,7 @@ const NAV_ITEMS = [
   { id: "knowledge", label: "Knowledge", icon: BrainCircuit, path: "/knowledge" },
   { id: "evidence-req", label: "Evidence Requests", icon: FileQuestion, path: "/evidence-requests" },
   { id: "freeze", label: "Freeze", icon: Snowflake, path: "/freeze" },
+  { id: "tcg", label: "Test Case Generator", icon: FileText, path: "/test-case-generator" },
   { id: "divider", label: "TESTING", icon: null, path: "" },
   { id: "test-design", label: "Test Design", icon: TestTubeDiagonal, path: "/test-design" },
   { id: "test-cases", label: "Test Cases", icon: TestTubes, path: "/test-cases" },
@@ -235,6 +240,7 @@ function Sidebar({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => 
 function MipLayoutInner() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const { exportProject, importProject, state, currentProject } = useMip();
+  const location = useLocation();
 
   const handleExport = async () => {
     if (!currentProject) return;

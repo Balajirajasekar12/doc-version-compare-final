@@ -5,6 +5,7 @@
 import React, { useCallback, useState, useRef } from "react";
 import { useMip } from "../context";
 import { Upload as UploadIcon, FileText, Archive, Trash2, CheckCircle2, AlertCircle, Loader2, Zap, FolderArchive } from "lucide-react";
+import { toast } from "sonner";
 
 export default function MipUploadPage() {
   const { state, currentProject, uploadFiles, analyzeProject } = useMip();
@@ -33,6 +34,9 @@ export default function MipUploadPage() {
     setAnalyzing(true);
     try {
       await analyzeProject();
+      toast.success("Analysis complete", { description: `Analyzed ${state.sourceFiles.length} source files.` });
+    } catch (err) {
+      toast.error("Analysis failed", { description: err instanceof Error ? err.message : "Unknown error" });
     } finally {
       setAnalyzing(false);
     }
@@ -63,7 +67,7 @@ export default function MipUploadPage() {
           isOver ? "border-cyan-500 bg-cyan-500/5" : "border-white/10 bg-white/[0.01]"
         }`}
       >
-        <input ref={ref} type="file" multiple className="hidden" accept=".java,.sql,.pls,.pkb,.pks,.json,.xml,.sh,.ejb,.txt,.py,.ts,.js,.properties,.yml,.yaml,.zip" onChange={(e) => handleFileInput(e, side)} />
+        <input ref={ref} type="file" multiple className="hidden" onChange={(e) => handleFileInput(e, side)} />
 
         <div className="flex items-center justify-between">
           <div>
@@ -79,7 +83,7 @@ export default function MipUploadPage() {
           <div className="mt-6 flex flex-col items-center py-8">
             <Archive size={28} className="text-slate-600" />
             <p className="mt-2 text-xs text-slate-500">Drag & drop files or ZIP archives here</p>
-            <p className="mt-0.5 text-[10px] text-slate-600">.java .sql .pls .pkb .json .xml .sh .zip</p>
+            <p className="mt-0.5 text-[10px] text-slate-600">All file types accepted — PDF, DOCX, XLSX, RTF, ZIP, COBOL, and more</p>
           </div>
         ) : (
           <div className="mt-4 max-h-60 space-y-1 overflow-y-auto">

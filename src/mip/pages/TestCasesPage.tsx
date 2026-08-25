@@ -4,7 +4,7 @@
 
 import React, { useState } from "react";
 import { useMip } from "../context";
-import { TestTubes, Plus, Play, CheckCircle2, XCircle, Clock, Ban, ArrowRight, AlertTriangle, Loader2 } from "lucide-react";
+import { TestTubes, Plus, Play, CheckCircle2, XCircle, Clock, Ban, ArrowRight, AlertTriangle, Loader2, Download } from "lucide-react";
 
 const STATUS_ICONS: Record<string, React.ReactNode> = {
   not_run: <Clock size={10} className="text-slate-500" />,
@@ -19,6 +19,33 @@ export default function TestCasesPage() {
   const { state, generateTestCases, dispatch } = useMip();
   const [generating, setGenerating] = useState(false);
   const [selectedScenarios, setSelectedScenarios] = useState<string[]>([]);
+  const [expandedTc, setExpandedTc] = useState<string | null>(null);
+
+  const exportToCSV = () => {
+    if (state.testCases.length === 0) return;
+    const headers = ["Case ID","Title","Type","Priority","Requirement","Preconditions","Objective","Steps","Expected Result","Actual Result","Status","SQL Validation"];
+    const rows = state.testCases.map(tc => [
+      tc.caseNumber,
+      tc.title,
+      tc.type,
+      tc.priority,
+      tc.requirement,
+      (tc.preconditions || []).join("; "),
+      tc.objective,
+      tc.steps.map(s => `Step ${s.stepNumber}: ${s.action} [Expected: ${s.expectedResult}]${s.sql ? ` [SQL: ${s.sql}]` : ""}`).join(" | "),
+      tc.expectedResult,
+      "",  // Actual Result - blank per master prompt
+      tc.status,
+      tc.sqlValidation || "",
+    ]);
+    const csv = [headers, ...rows].map(r => r.map(c => `\"${c.replace(/\"/g, '\"\"')}\"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `Manual_TestCases_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const handleGenerate = async () => {
     if (selectedScenarios.length === 0) return;
@@ -68,11 +95,19 @@ export default function TestCasesPage() {
             <p className="text-xs text-slate-600">No test scenarios defined. Create scenarios in Test Design first.</p>
           )}
         </div>
-        <button onClick={handleGenerate} disabled={selectedScenarios.length === 0 || generating}
-          className="mt-3 flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-medium text-[#07090d] hover:bg-cyan-400 disabled:opacity-50">
-          {generating ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
-          Generate Test Cases ({selectedScenarios.length} scenarios)
-        </button>
+        <div className="mt-3 flex items-center gap-2">
+          <button onClick={handleGenerate} disabled={selectedScenarios.length === 0 || generating}
+            className="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-medium text-[#07090d] hover:bg-cyan-400 disabled:opacity-50">
+            {generating ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            Generate Test Cases ({selectedScenarios.length} scenarios)
+          </button>
+          {state.testCases.length > 0 && (
+            <button onClick={exportToCSV}
+              className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-slate-300 hover:bg-white/[0.07]">
+              <Download size={12} /> Export Test Cases (.csv)
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Test cases list */}
@@ -89,8 +124,22 @@ export default function TestCasesPage() {
                   }`}>{tc.priority}</span>
                   <span className="text-[10px] text-slate-500">{tc.type}</span>
                 </div>
-                <h3 className="mt-1 text-sm font-medium text-white">{tc.title}</h3>
-                <p className="mt-0.5 text-xs text-slate-400">{tc.objective}</p>
+            <h3 className="mt-1 text-sm font-medium text-white">{tc.title}</h3>
+            <p className="mt-0.5 text-xs text-slate-400">{tc.objective}</p>
+            {tc.preconditions && tc.preconditions.length > 0 && (
+              <div className="mt-1">
+                <span className="text-[10px] text-slate-500">Preconditions:</span>
+                <ul className="mt-0.5 list-disc list-inside text-[10px] text-slate-400">
+                  {tc.preconditions.map((p, i) => <li key={i}>{p}</li>)}
+                </ul>
+              </div>
+            )}
+            {tc.sqlValidation && (
+              <div className="mt-1 rounded-lg bg-white/[0.03] p-2">
+                <span className="text-[10px] text-slate-500">SQL Validation:</span>
+                <pre className="mt-1 text-[10px] text-slate-300 font-mono whitespace-pre-wrap">{tc.sqlValidation}</pre>
+              </div>
+            )}
               </div>
               <div className="flex items-center gap-2">
                 {STATUS_ICONS[tc.status]}
@@ -123,12 +172,7 @@ export default function TestCasesPage() {
               </div>
             )}
 
-            {tc.sqlValidation && (
-              <div className="mt-2 rounded-lg bg-white/[0.02] p-2">
-                <span className="text-[10px] text-slate-500">SQL Validation:</span>
-                <pre className="mt-1 text-[10px] text-slate-300 font-mono whitespace-pre-wrap">{tc.sqlValidation}</pre>
-              </div>
-            )}
+
           </div>
         ))}
         {state.testCases.length === 0 && (

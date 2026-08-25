@@ -206,7 +206,58 @@ export interface TransformationInfo {
 // --- Findings ---
 export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type FindingStatus = "open" | "valid_issue" | "intentionally_missed" | "deferred" | "accepted" | "resolved" | "needs_investigation";
-export type FindingCategory = "logic_missing" | "logic_changed" | "condition_removed" | "condition_added" | "db_operation_changed" | "table_mapping_changed" | "field_mapping_changed" | "validation_removed" | "validation_changed" | "error_handling_removed" | "error_handling_changed" | "scheduler_changed" | "io_changed" | "transformation_changed" | "dependency_changed";
+export type FindingCategory = "logic_missing" | "logic_changed" | "condition_removed" | "condition_added" | "db_operation_changed" | "table_mapping_changed" | "field_mapping_changed" | "validation_removed" | "validation_changed" | "error_handling_removed" | "error_handling_changed" | "scheduler_changed" | "io_changed" | "transformation_changed" | "dependency_changed" | "missing_functionality" | "changed_behavior" | "added_behavior" | "removed_behavior" | "missing_validation" | "missing_error_handling" | "missing_database_interaction" | "changed_status_code" | "missing_status_code" | "changed_data_mapping" | "missing_data_mapping" | "changed_job_flow" | "missing_job_step" | "changed_rule" | "missing_rule" | "external_rule" | "unknown";
+
+export type DifferenceCategory =
+  | "MISSING_FUNCTIONALITY" | "CHANGED_BEHAVIOR" | "ADDED_BEHAVIOR" | "REMOVED_BEHAVIOR"
+  | "CHANGED_CONDITION" | "MISSING_VALIDATION" | "CHANGED_VALIDATION"
+  | "MISSING_ERROR_HANDLING" | "CHANGED_ERROR_HANDLING"
+  | "CHANGED_DATABASE_INTERACTION" | "MISSING_DATABASE_INTERACTION"
+  | "CHANGED_STATUS_CODE" | "MISSING_STATUS_CODE"
+  | "CHANGED_DATA_MAPPING" | "MISSING_DATA_MAPPING"
+  | "CHANGED_JOB_FLOW" | "MISSING_JOB_STEP"
+  | "CHANGED_RULE" | "MISSING_RULE" | "EXTERNAL_RULE" | "UNKNOWN";
+
+export interface ExtractedBusinessRule {
+  id: string;
+  ruleNumber: string;
+  title: string;
+  description: string;
+  condition: string;
+  action: string;
+  otherwise: string;
+  sourceRef: string;
+  confidence: "high" | "medium" | "low";
+  statusInLegacy: "identified" | "confirmed";
+  statusInMod: "not_found" | "found" | "confirmed" | "intentionally_removed" | "unknown";
+}
+
+export interface MissingInformation {
+  type: "table_schema" | "sample_data" | "clob_content" | "configuration" | "java_class" | "sql_query" | "status_code_meaning" | "other";
+  description: string;
+  whyNeeded: string;
+  suggestedQuery?: string;
+}
+
+export interface BusinessExplanation {
+  plainEnglishSummary: string;
+  whatLegacyDoes: string;
+  whatModDoes: string;
+  whatIsDifferent: string;
+  whyItMatters: string;
+  possibleImpact: string;
+  simpleExample?: string;
+  missingInformation: MissingInformation[];
+  suggestedQuestionForDev: string;
+  extractedRules: ExtractedBusinessRule[];
+  functionality?: string;
+  legacyFlow?: string;
+  modFlow?: string;
+  confidenceExplanation: string;
+}
+
+// --- Information Requests ---
+export type InfoRequestStatus = "waiting_for_user" | "waiting_for_analysis" | "resolved" | "still_unclear";
 
 export interface Finding {
   id: string;
@@ -237,6 +288,10 @@ export interface Finding {
   linkedRuleId?: string;
   linkedScenarioId?: string;
   linkedTestCaseId?: string;
+  // Business explanation layer
+  businessExplanation?: BusinessExplanation;
+  differenceCategory?: DifferenceCategory;
+  functionality?: string;
 }
 
 export interface LegacySourceRef {
