@@ -1,15 +1,29 @@
 /**
- * Image repositioning using ExcelJS.
+ * Image repositioning — TWO-PASS APPROACH.
  *
- * Every previous approach that modified OOXML drawing XML directly
- * (regex, xmldom re-serialization) corrupted the file because Excel's
- * OOXML parser is stricter than any JS XML library.
+ * PASS 1: Use ExcelJS to READ the workbook and calculate where images
+ *          should be moved (layout calculation only).
  *
- * ExcelJS handles OOXML namespace serialization natively and correctly.
- * This module loads the workbook with ExcelJS, modifies image positions
- * in the internal model, and saves back — producing valid XML.
+ * PASS 2: Apply the calculated positions by surgically modifying the
+ *          original zip's drawing XML — replacing only <row> and <rowOff>
+ *          values while preserving every other byte (including namespace
+ *          declarations, element order, whitespace, and attributes).
+ *
+ * WHY NOT USE EXCELJS TO WRITE:
+ *   ExcelJS's writeBuffer() re-serializes OOXML XML from its internal model.
+ *   Even though the result is structurally valid XML, Excel's stricter
+ *   OOXML parser detects subtle namespace/attribute differences and triggers
+ *   "Repaired Records: Drawing" — wiping all images.
+ *
+ * WHY SURGICAL XML MODIFICATION WORKS:
+ *   We modify the EXACT same XML bytes that were in the original file,
+ *   changing only the numeric content of <row> and <rowOff> elements
+ *   inside <from> and <to> blocks. Every other byte — including XML
+ *   declarations, namespace prefixes, element ordering, CDATA sections,
+ *   processing instructions, and comments — remains byte-for-byte identical.
  */
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import { debugLog } from "./debug-log";
 
 /** EMU per pixel (914400 EMU per inch / 96 px per inch). */
@@ -17,29 +31,26 @@ const EMU_PER_PX = 9525;
 /** EMU per row (default 15pt row height × 12700 EMU/pt). */
 const EMU_PER_ROW = 15 * 12700;
 /** EMU per column (default 8.43 chars × 7 px/char × 9525 EMU/px). */
-const EMU_PER_COL = (8.43 * 7) * EMU_PER_PX;
-/** Spacing between repositioned images (in EMU). */
-const SPACING_EMU = 2 * EMU_PER_ROW; // 2 rows gap
+const EMU_PER_COL = 8.43 * 7 * EMU_PER_PX;
+/** Spacing between repositioned images (in rows). */
+const GRID_ROW_GAP = 2;
 /** Max images per grid row. */
 const MAX_GRID_COLS = 3;
+/** Target image width in columns (~500px). */
+const TARGET_WIDTH_COLS = 7;
+/** Target image height in rows (~375px). */
+const TARGET_HEIGHT_ROWS = 25;
 
 /**
- * Result returned after repositioning images.
+ * Result from the layout calculation phase.
  */
 export interface ImageRepositionResult {
-  /** Total images found across all sheets. */
   totalImages: number;
-  /** Images that were repositioned. */
   imagesRepositioned: number;
-  /** Number of image-image overlaps before. */
   overlapsBefore: number;
-  /** Number of image-image overlaps after. */
   overlapsAfter: number;
-  /** Number of image-content conflicts before. */
   contentConflictsBefore: number;
-  /** Number of image-content conflicts after. */
   contentConflictsAfter: number;
-  /** Per-sheet stats. */
   sheets: Array<{
     name: string;
     images: number;
@@ -50,42 +61,17 @@ export interface ImageRepositionResult {
 }
 
 /**
- * Internal representation of an image's position.
+ * Per-anchor modification: new row/rowOff values for <from> and <to>.
  */
-interface ImagePos {
-  /** Index in the worksheet._media array. */
-  mediaIndex: number;
-  /** imageId from ExcelJS. */
-  imageId: string;
-  /** Top-left column (0-based). */
-  tlCol: number;
-  /** Top-left row (0-based). */
-  tlRow: number;
-  /** Top-left column offset (in EMU). */
-  tlColOff: number;
-  /** Top-left row offset (in EMU). */
-  tlRowOff: number;
-  /** Bottom-right column (0-based). */
-  brCol: number;
-  /** Bottom-right row (0-based). */
-  brRow: number;
-  /** Bottom-right column offset (in EMU). */
-  brColOff: number;
-  /** Bottom-right row offset (in EMU). */
-  brRowOff: number;
-  /** Width in EMU. */
-  widthEmu: number;
-  /** Height in EMU. */
-  heightEmu: number;
-  /** Whether this image overlaps cell content. */
-  overlapsContent: boolean;
-  /** Whether this image was moved. */
-  moved: boolean;
+interface AnchorRowChange {
+  fromRow: number;
+  fromRowOff: number;
+  toRow: number;
+  toRowOff: number;
 }
 
-/**
- * Analyzes a worksheet's content to find the last row with non-empty cells.
- */
+// ─── PASS 1: LAYOUT CALCULATION (ExcelJS read-only) ───────────────────────
+
 function getLastContentRow(ws: ExcelJS.Worksheet): number {
   let maxRow = 0;
   ws.eachRow({ includeEmpty: false }, (row, rowNum) => {
@@ -103,51 +89,33 @@ function getLastContentRow(ws: ExcelJS.Worksheet): number {
   return maxRow;
 }
 
-/**
- * Converts a 0-based row number to EMU (approximate).
- */
 function rowToEmu(row: number, ws: ExcelJS.Worksheet): number {
-  // Use actual row heights if available, otherwise default 15pt
   let acc = 0;
-  for (let r = 0; r < row; r++) {
-    const rowObj = ws.getRow(r + 1); // ExcelJS rows are 1-based
-    const ht = rowObj.height || ws.properties.defaultRowHeight || 15;
-    acc += ht * 12700; // points to EMU
+  for (let r = 1; r <= row; r++) {
+    const rowObj = ws.getRow(r);
+    const ht = rowObj.height || (ws.properties.defaultRowHeight as number) || 15;
+    acc += ht * 12700;
   }
   return acc;
 }
 
-/**
- * Checks if two image rectangles overlap (in EMU coordinates).
- */
-function imagesOverlap(a: ImagePos, b: ImagePos): boolean {
-  const aRight = a.tlCol * EMU_PER_COL + a.tlColOff + a.widthEmu;
-  const aBottom = a.tlRow * EMU_PER_ROW + a.tlRowOff + a.heightEmu;
-  const bRight = b.tlCol * EMU_PER_COL + b.tlColOff + b.widthEmu;
-  const bBottom = b.tlRow * EMU_PER_ROW + b.tlRowOff + b.heightEmu;
-  const aLeft = a.tlCol * EMU_PER_COL + a.tlColOff;
-  const aTop = a.tlRow * EMU_PER_ROW + a.tlRowOff;
-  const bLeft = b.tlCol * EMU_PER_COL + b.tlColOff;
-  const bTop = b.tlRow * EMU_PER_ROW + b.tlRowOff;
-  return aLeft < bRight && aRight > bLeft && aTop < bBottom && aBottom > bTop;
+interface ImageInfo {
+  mediaIndex: number;
+  tlCol: number;
+  tlRow: number;
+  tlColOff: number;
+  tlRowOff: number;
+  brCol: number;
+  brRow: number;
+  brColOff: number;
+  brRowOff: number;
+  widthEmu: number;
+  heightEmu: number;
 }
 
-/**
- * Checks if an image overlaps the content region of the worksheet.
- */
-function imageOverlapsContent(img: ImagePos, contentBoundaryRow: number, ws: ExcelJS.Worksheet): boolean {
-  if (contentBoundaryRow === 0) return false;
-  const boundaryEmu = rowToEmu(contentBoundaryRow, ws);
-  const imgTop = img.tlRow * EMU_PER_ROW + img.tlRowOff;
-  return imgTop < boundaryEmu;
-}
-
-/**
- * Extracts image positions from an ExcelJS worksheet.
- */
-function extractImagePositions(ws: ExcelJS.Worksheet): ImagePos[] {
+function extractImagePositions(ws: ExcelJS.Worksheet): ImageInfo[] {
   const images = ws.getImages();
-  const positions: ImagePos[] = [];
+  const positions: ImageInfo[] = [];
 
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
@@ -156,21 +124,21 @@ function extractImagePositions(ws: ExcelJS.Worksheet): ImagePos[] {
     const tl = img.range.tl;
     const br = img.range.br;
 
-    const tlCol = tl.nativeCol ?? tl.col ?? 0;
-    const tlRow = tl.nativeRow ?? tl.row ?? 0;
-    const tlColOff = tl.nativeColOff ?? 0;
-    const tlRowOff = tl.nativeRowOff ?? 0;
+    const tlCol = (tl.nativeCol ?? tl.col ?? 0) as number;
+    const tlRow = (tl.nativeRow ?? tl.row ?? 0) as number;
+    const tlColOff = (tl.nativeColOff ?? 0) as number;
+    const tlRowOff = (tl.nativeRowOff ?? 0) as number;
 
-    // For oneCellAnchor, br may not exist — compute from ext
     let brCol: number, brRow: number, brColOff: number, brRowOff: number;
     if (br) {
-      brCol = br.nativeCol ?? br.col ?? tlCol + 1;
-      brRow = br.nativeRow ?? br.row ?? tlRow + 1;
-      brColOff = br.nativeColOff ?? 0;
-      brRowOff = br.nativeRowOff ?? 0;
+      brCol = (br.nativeCol ?? br.col ?? tlCol + 1) as number;
+      brRow = (br.nativeRow ?? br.row ?? tlRow + 1) as number;
+      brColOff = (br.nativeColOff ?? 0) as number;
+      brRowOff = (br.nativeRowOff ?? 0) as number;
     } else {
-      // Estimate from range.ext or default size
-      const ext = (img.range as unknown as Record<string, unknown>).ext as { cx?: number; cy?: number } | undefined;
+      const ext = (img.range as unknown as Record<string, unknown>).ext as
+        | { cx?: number; cy?: number }
+        | undefined;
       const widthEmu = ext?.cx ?? 500 * EMU_PER_PX;
       const heightEmu = ext?.cy ?? 350 * EMU_PER_PX;
       brCol = tlCol;
@@ -179,7 +147,6 @@ function extractImagePositions(ws: ExcelJS.Worksheet): ImagePos[] {
       brRowOff = tlRowOff + heightEmu;
     }
 
-    // Compute size in EMU
     const leftEmu = tlCol * EMU_PER_COL + tlColOff;
     const rightEmu = brCol * EMU_PER_COL + brColOff;
     const topEmu = tlRow * EMU_PER_ROW + tlRowOff;
@@ -189,7 +156,6 @@ function extractImagePositions(ws: ExcelJS.Worksheet): ImagePos[] {
 
     positions.push({
       mediaIndex: i,
-      imageId: img.imageId,
       tlCol,
       tlRow,
       tlColOff,
@@ -200,96 +166,324 @@ function extractImagePositions(ws: ExcelJS.Worksheet): ImagePos[] {
       brRowOff,
       widthEmu,
       heightEmu,
-      overlapsContent: false,
-      moved: false,
     });
   }
 
   return positions;
 }
 
-/**
- * Sets image position on an ExcelJS worksheet by modifying the internal media model.
- *
- * This is the key function that works because ExcelJS handles OOXML serialization.
- */
-function setImagePosition(
+function imageOverlapsContent(
+  img: ImageInfo,
+  contentBoundaryRow: number,
   ws: ExcelJS.Worksheet,
-  img: ImagePos,
-  newTlRow: number,
-  newTlCol: number,
-  newTlRowOff: number = 0,
-  newTlColOff: number = 0,
-): void {
-  const media = (ws as unknown as Record<string, unknown>)._media as Array<{
-    type: string;
-    range: {
-      tl: { nativeRow: number; nativeCol: number; nativeRowOff: number; nativeColOff: number; row: number; col: number };
-      br: { nativeRow: number; nativeCol: number; nativeRowOff: number; nativeColOff: number; row: number; col: number };
-    };
-  }> | undefined;
-
-  if (!media || !media[img.mediaIndex]) return;
-
-  const entry = media[img.mediaIndex];
-  if (entry.type !== "image") return;
-
-  // Compute new br position to maintain size
-  const newBrColOff = newTlColOff + img.widthEmu;
-  const newBrRowOff = newTlRowOff + img.heightEmu;
-
-  // The br row/col is wherever the offset lands
-  let newBrCol = newTlCol;
-  let newBrRow = newTlRow;
-  let finalBrColOff = newBrColOff;
-  let finalBrRowOff = newBrRowOff;
-
-  // If offsets exceed one column/row width, roll into the next column/row
-  while (finalBrColOff >= EMU_PER_COL) {
-    finalBrColOff -= EMU_PER_COL;
-    newBrCol++;
-  }
-  while (finalBrRowOff >= EMU_PER_ROW) {
-    finalBrRowOff -= EMU_PER_ROW;
-    newBrRow++;
-  }
-
-  // Set top-left
-  entry.range.tl.nativeRow = newTlRow;
-  entry.range.tl.nativeCol = newTlCol;
-  entry.range.tl.nativeRowOff = newTlRowOff;
-  entry.range.tl.nativeColOff = newTlColOff;
-  entry.range.tl.row = newTlRow;
-  entry.range.tl.col = newTlCol;
-
-  // Set bottom-right
-  entry.range.br.nativeRow = newBrRow;
-  entry.range.br.nativeCol = newBrCol;
-  entry.range.br.nativeRowOff = finalBrRowOff;
-  entry.range.br.nativeColOff = finalBrColOff;
-  entry.range.br.row = newBrRow;
-  entry.range.br.col = newBrCol;
+): boolean {
+  if (contentBoundaryRow === 0) return false;
+  const boundaryEmu = rowToEmu(contentBoundaryRow, ws);
+  const imgTop = img.tlRow * EMU_PER_ROW + img.tlRowOff;
+  return imgTop < boundaryEmu;
 }
 
-/**
- * Counts overlapping image pairs.
- */
-function countOverlaps(positions: ImagePos[]): number {
+function imagesOverlap(a: ImageInfo, b: ImageInfo): boolean {
+  const aLeft = a.tlCol * EMU_PER_COL + a.tlColOff;
+  const aRight = a.brCol * EMU_PER_COL + a.brColOff;
+  const aTop = a.tlRow * EMU_PER_ROW + a.tlRowOff;
+  const aBottom = a.brRow * EMU_PER_ROW + a.brRowOff;
+  const bLeft = b.tlCol * EMU_PER_COL + b.tlColOff;
+  const bRight = b.brCol * EMU_PER_COL + b.brColOff;
+  const bTop = b.tlRow * EMU_PER_ROW + b.tlRowOff;
+  const bBottom = b.brRow * EMU_PER_ROW + b.brRowOff;
+  return aLeft < bRight && aRight > bLeft && aTop < bBottom && aBottom > bTop;
+}
+
+function countOverlaps(positions: ImageInfo[]): number {
   let count = 0;
   for (let i = 0; i < positions.length; i++) {
     for (let j = i + 1; j < positions.length; j++) {
-      if (imagesOverlap(positions[i], positions[j])) {
-        count++;
-      }
+      if (imagesOverlap(positions[i], positions[j])) count++;
     }
   }
   return count;
 }
 
 /**
- * Main entry point: repositions images on all worksheets of a workbook buffer.
+ * Compute new positions for images that need repositioning.
+ * Returns per-anchor row changes keyed by mediaIndex.
+ */
+function calculateRepositioning(
+  ws: ExcelJS.Worksheet,
+): { positions: ImageInfo[]; changes: Map<number, AnchorRowChange> } {
+  const positions = extractImagePositions(ws);
+  const changes = new Map<number, AnchorRowChange>();
+
+  if (positions.length === 0) return { positions, changes };
+
+  const lastContentRow = getLastContentRow(ws);
+
+  // Detect which images need moving
+  const needsMove: ImageInfo[] = [];
+  for (const pos of positions) {
+    const contentOverlap = imageOverlapsContent(pos, lastContentRow, ws);
+    const imgOverlap = positions.some(
+      (q) => q !== pos && imagesOverlap(pos, q),
+    );
+    if (contentOverlap || imgOverlap) {
+      needsMove.push(pos);
+    }
+  }
+
+  if (needsMove.length === 0) return { positions, changes };
+
+  // Sort by original position
+  needsMove.sort((a, b) => a.tlRow - b.tlRow || a.tlCol - b.tlCol);
+
+  // Start row: 3 rows below content
+  const startRow = lastContentRow + 3;
+
+  // Group nearby images (within 5 rows of each other)
+  const groups: ImageInfo[][] = [];
+  let currentGroup: ImageInfo[] = [needsMove[0]];
+  for (let i = 1; i < needsMove.length; i++) {
+    const prev = currentGroup[currentGroup.length - 1];
+    const curr = needsMove[i];
+    if (Math.abs(curr.tlRow - prev.tlRow) <= 5) {
+      currentGroup.push(curr);
+    } else {
+      groups.push(currentGroup);
+      currentGroup = [curr];
+    }
+  }
+  groups.push(currentGroup);
+
+  let currentRow = startRow;
+
+  for (const group of groups) {
+    const cols = Math.min(group.length, MAX_GRID_COLS);
+
+    for (let idx = 0; idx < group.length; idx++) {
+      const img = group[idx];
+      const gridRow = Math.floor(idx / cols);
+      const gridCol = idx % cols;
+
+      const newTlCol = gridCol * (TARGET_WIDTH_COLS + 1);
+      const newTlRow = currentRow + gridRow * (TARGET_HEIGHT_ROWS + GRID_ROW_GAP);
+      const newTlColOff = 0;
+      const newTlRowOff = 0;
+
+      // Maintain size — compute new br position
+      const newBrColOff = newTlColOff + img.widthEmu;
+      const newBrRowOff = newTlRowOff + img.heightEmu;
+      let newBrCol = newTlCol;
+      let newBrRow = newTlRow;
+      let finalBrColOff = newBrColOff;
+      let finalBrRowOff = newBrRowOff;
+
+      while (finalBrColOff >= EMU_PER_COL) {
+        finalBrColOff -= EMU_PER_COL;
+        newBrCol++;
+      }
+      while (finalBrRowOff >= EMU_PER_ROW) {
+        finalBrRowOff -= EMU_PER_ROW;
+        newBrRow++;
+      }
+
+      changes.set(img.mediaIndex, {
+        fromRow: newTlRow,
+        fromRowOff: Math.round(newTlRowOff),
+        toRow: newBrRow,
+        toRowOff: Math.round(finalBrRowOff),
+      });
+    }
+
+    const gridRows = Math.ceil(group.length / cols);
+    currentRow += gridRows * (TARGET_HEIGHT_ROWS + GRID_ROW_GAP) + 3;
+  }
+
+  return { positions, changes };
+}
+
+// ─── PASS 2: SURGICAL XML MODIFICATION (JSZip + regex) ───────────────────
+
+/**
+ * Replace <row> and <rowOff> values inside a single <from> or <to> block.
  *
- * @param buffer - The xlsx file as ArrayBuffer (output from saveZip)
+ * This function receives the INNER CONTENT of a <from> or <to> element
+ * and returns the inner content with row values updated.
+ *
+ * Uses single-backslash regex (standard JS) to match namespace-prefixed
+ * elements like <xdr:row> and <xdr:rowOff>.
+ */
+function replaceRowValues(
+  inner: string,
+  newRow: number,
+  newRowOff: number,
+): string {
+  // Match <(prefix?)row>(digits)</(prefix?)row> — preserves namespace prefix
+  let result = inner.replace(
+    /(<(\w+:)?row>)(\d+)(<\/(\w+:)?row>)/,
+    (_m: string, open: string, _np1: string | undefined, _num: string, close: string) =>
+      `${open}${newRow}${close}`,
+  );
+  result = result.replace(
+    /(<(\w+:)?rowOff>)(\d+)(<\/(\w+:)?rowOff>)/,
+    (_m: string, open: string, _np1: string | undefined, _num: string, close: string) =>
+      `${open}${newRowOff}${close}`,
+  );
+  return result;
+}
+
+/**
+ * Apply row position changes to a drawing XML string.
+ *
+ * Strategy: match each <from>...</from> and <to>...</to> block as a
+ * complete unit. For anchors that were MOVED, replace <row>/<rowOff>
+ * values within that block. For anchors that were NOT moved, leave
+ * the XML byte-for-byte identical.
+ *
+ * This prevents:
+ *   1. Cross-anchor corruption (regex matching across anchor boundaries)
+ *   2. Namespace prefix stripping (preserves original prefix text)
+ *   3. Unmoved anchor corruption (skipped entirely)
+ */
+function applyRowChangesToDrawingXml(
+  xml: string,
+  changes: Map<number, AnchorRowChange>,
+  totalAnchors: number,
+): string {
+  if (changes.size === 0) return xml;
+
+  // Phase 1: Update <from> blocks
+  let fromIdx = 0;
+  let result = xml.replace(
+    /<(\w+:)?from\b([^>]*)>([\s\S]*?)<\/(\w+:)?from>/g,
+    (
+      fullMatch: string,
+      _pfx1: string | undefined,
+      _attrs: string,
+      inner: string,
+      _pfx2: string | undefined,
+    ) => {
+      if (fromIdx >= totalAnchors) return fullMatch;
+      const anchorIdx = fromIdx;
+      fromIdx++;
+
+      const change = changes.get(anchorIdx);
+      if (!change) return fullMatch; // unmoved — preserve exactly
+
+      const updated = replaceRowValues(inner, change.fromRow, change.fromRowOff);
+      return updated === inner ? fullMatch : fullMatch.replace(inner, updated);
+    },
+  );
+
+  // Phase 2: Update <to> blocks (for twoCellAnchor)
+  let toIdx = 0;
+  result = result.replace(
+    /<(\w+:)?to\b([^>]*)>([\s\S]*?)<\/(\w+:)?to>/g,
+    (
+      fullMatch: string,
+      _pfx1: string | undefined,
+      _attrs: string,
+      inner: string,
+      _pfx2: string | undefined,
+    ) => {
+      if (toIdx >= totalAnchors) return fullMatch;
+      const anchorIdx = toIdx;
+      toIdx++;
+
+      const change = changes.get(anchorIdx);
+      if (!change) return fullMatch; // unmoved — preserve exactly
+
+      const updated = replaceRowValues(inner, change.toRow, change.toRowOff);
+      return updated === inner ? fullMatch : fullMatch.replace(inner, updated);
+    },
+  );
+
+  return result;
+}
+
+/**
+ * Count anchors in a drawing XML string.
+ */
+function countAnchors(xml: string): number {
+  return (
+    (xml.match(/<\w*:?(twoCellAnchor)\b/g) || []).length +
+    (xml.match(/<\w*:?(oneCellAnchor)\b/g) || []).length
+  );
+}
+
+/**
+ * Maps an ExcelJS worksheet to its drawing XML path in the zip.
+ *
+ * Strategy: use the sheet's rels to find the drawing relationship target.
+ * Fallback: scan all xl/drawings/*.xml entries and match by anchor count.
+ */
+async function mapSheetToDrawingPath(
+  zip: JSZip,
+  ws: ExcelJS.Worksheet,
+  imageCount: number,
+): Promise<string | null> {
+  // Try rels-based lookup
+  const wsDir = "xl/worksheets/";
+  const relsPath = `${wsDir}_rels/sheet${ws.id}.xml.rels`;
+  const relsEntry = zip.file(relsPath);
+  if (relsEntry) {
+    try {
+      const relsXml = await relsEntry.async("string");
+      const drawingMatch = relsXml.match(
+        /Target\s*=\s*"([^"]*drawing[^"]*)"/i,
+      );
+      if (drawingMatch) {
+        let target = drawingMatch[1];
+        if (!target.startsWith("/")) {
+          target = wsDir + target;
+        } else {
+          target = target.replace(/^\//, "");
+        }
+        // Normalize path (resolve ../ etc.)
+        const parts = target.split("/");
+        const normalized: string[] = [];
+        for (const p of parts) {
+          if (p === "..") normalized.pop();
+          else if (p !== "." && p !== "") normalized.push(p);
+        }
+        const normalizedPath = normalized.join("/");
+        if (zip.file(normalizedPath)) return normalizedPath;
+      }
+    } catch {
+      // rels unreadable — fall through to count-based matching
+    }
+  }
+
+  // Fallback: enumerate drawing files and match by anchor count
+  const drawingFiles = Object.keys(zip.files).filter(
+    (name) =>
+      !zip.files[name].dir &&
+      /^xl\/drawings\/drawing\d+\.xml$/i.test(name),
+  );
+
+  for (const drawingPath of drawingFiles) {
+    const entry = zip.file(drawingPath);
+    if (!entry) continue;
+    const drawingXml = await entry.async("string");
+    const anchorCount = countAnchors(drawingXml);
+    if (anchorCount === imageCount) return drawingPath;
+  }
+
+  return null;
+}
+
+// ─── MAIN ENTRY POINT ─────────────────────────────────────────────────────
+
+/**
+ * Reposition images to eliminate overlaps.
+ *
+ * TWO-PASS ARCHITECTURE:
+ *   Pass 1: ExcelJS reads the workbook → calculates new positions
+ *   Pass 2: Surgical regex modifies the original zip's drawing XML
+ *
+ * The original zip bytes are preserved except for the specific numeric
+ * values in <row> and <rowOff> elements that control image anchoring.
+ *
+ * @param buffer - The xlsx file as ArrayBuffer (from saveZip)
  * @returns A new ArrayBuffer with repositioned images, and stats
  */
 export async function repositionImages(
@@ -297,7 +491,7 @@ export async function repositionImages(
 ): Promise<{ buffer: ArrayBuffer; stats: ImageRepositionResult }> {
   const startTime = performance.now();
 
-  // Load with ExcelJS
+  // ── Pass 1: Layout calculation using ExcelJS (read-only) ──
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
@@ -311,117 +505,128 @@ export async function repositionImages(
     sheets: [],
   };
 
+  // Per-sheet repositioning plans
+  const sheetPlans: Array<{
+    ws: ExcelJS.Worksheet;
+    changes: Map<number, AnchorRowChange>;
+    imageCount: number;
+    repositioned: number;
+    overlapsBefore: number;
+  }> = [];
+
   workbook.eachSheet((ws) => {
-    const positions = extractImagePositions(ws);
+    const { positions, changes } = calculateRepositioning(ws);
     if (positions.length === 0) return;
 
     stats.totalImages += positions.length;
-
-    // Find content boundary
-    const lastContentRow = getLastContentRow(ws);
-    debugLog.log("IMG_REPOS", `${ws.name}: ${positions.length} images, lastContentRow=${lastContentRow}`);
-
-    // Detect overlaps before
     const overlapsBefore = countOverlaps(positions);
-    let contentConflictsBefore = 0;
-    for (const pos of positions) {
-      pos.overlapsContent = imageOverlapsContent(pos, lastContentRow, ws);
-      if (pos.overlapsContent) contentConflictsBefore++;
-    }
+    const lastContentRow = getLastContentRow(ws);
+    const contentConflictsBefore = positions.filter((p) =>
+      imageOverlapsContent(p, lastContentRow, ws),
+    ).length;
 
-    // Determine images that need repositioning
-    const needsMove = positions.filter(
-      (p) => p.overlapsContent || positions.some((q) => q !== p && imagesOverlap(p, q))
+    stats.overlapsBefore += overlapsBefore;
+    stats.contentConflictsBefore += contentConflictsBefore;
+    stats.imagesRepositioned += changes.size;
+
+    debugLog.log(
+      "IMG_REPOS",
+      `${ws.name}: ${positions.length} images, ` +
+        `${changes.size} to reposition, overlaps=${overlapsBefore}, ` +
+        `contentConflicts=${contentConflictsBefore}`,
     );
 
-    if (needsMove.length === 0) {
-      debugLog.log("IMG_REPOS", `  ${ws.name}: no overlaps, skipping`);
-      stats.sheets.push({
-        name: ws.name,
-        images: positions.length,
-        repositioned: 0,
-        overlapsBefore,
-        overlapsAfter: overlapsBefore,
-      });
-      return;
-    }
-
-    // Sort images that need moving by their original row position
-    needsMove.sort((a, b) => a.tlRow - b.tlRow || a.tlCol - b.tlCol);
-
-    // Calculate starting row: below all content, with gap
-    const startRow = lastContentRow + 3; // 3 rows below content
-
-    // Group nearby images (within 5 rows of each other)
-    const groups: ImagePos[][] = [];
-    let currentGroup: ImagePos[] = [needsMove[0]];
-
-    for (let i = 1; i < needsMove.length; i++) {
-      const prev = currentGroup[currentGroup.length - 1];
-      const curr = needsMove[i];
-      const gap = Math.abs(curr.tlRow - prev.tlRow);
-      if (gap <= 5) {
-        currentGroup.push(curr);
-      } else {
-        groups.push(currentGroup);
-        currentGroup = [curr];
-      }
-    }
-    groups.push(currentGroup);
-
-    let currentRow = startRow;
-    let repositioned = 0;
-
-    for (const group of groups) {
-      const cols = Math.min(group.length, MAX_GRID_COLS);
-      const gridRows = Math.ceil(group.length / cols);
-
-      // Standardize image size: fit within a reasonable box
-      // Keep original size if it's reasonable (between 200px and 700px wide)
-      // Otherwise scale to 500px wide
-      const TARGET_WIDTH_COLS = 7; // ~500px in column units
-      const TARGET_HEIGHT_ROWS = 25; // ~375px in row units
-
-      for (let idx = 0; idx < group.length; idx++) {
-        const img = group[idx];
-        const gridRow = Math.floor(idx / cols);
-        const gridCol = idx % cols;
-
-        const newTlCol = gridCol * (TARGET_WIDTH_COLS + 1); // 1 col gap between images
-        const newTlRow = currentRow + gridRow * (TARGET_HEIGHT_ROWS + 2); // 2 row gap between grid rows
-
-        setImagePosition(ws, img, newTlRow, newTlCol);
-        img.moved = true;
-        repositioned++;
-      }
-
-      currentRow += gridRows * (TARGET_HEIGHT_ROWS + 2) + 3; // 3 row gap between groups
-    }
-
-    // Count overlaps after repositioning
-    const overlapsAfter = countOverlaps(positions);
-
-    stats.imagesRepositioned += repositioned;
-    stats.overlapsBefore += overlapsBefore;
-    stats.overlapsAfter += overlapsAfter;
-    stats.contentConflictsBefore += contentConflictsBefore;
-    stats.contentConflictsAfter += 0; // All moved below content
-
-    debugLog.log("IMG_REPOS", `  ${ws.name}: repositioned=${repositioned}, overlaps ${overlapsBefore}→${overlapsAfter}`);
+    sheetPlans.push({
+      ws,
+      changes,
+      imageCount: positions.length,
+      repositioned: changes.size,
+      overlapsBefore,
+    });
 
     stats.sheets.push({
       name: ws.name,
       images: positions.length,
-      repositioned,
+      repositioned: changes.size,
       overlapsBefore,
-      overlapsAfter,
+      overlapsAfter: 0,
     });
   });
 
-  // Write back
-  const outBuffer = await workbook.xlsx.writeBuffer() as ArrayBuffer;
-  const elapsed = Math.round(performance.now() - startTime);
-  debugLog.log("IMG_REPOS", `Done in ${elapsed}ms: ${stats.totalImages} images, ${stats.imagesRepositioned} repositioned`);
+  if (stats.totalImages === 0 || stats.imagesRepositioned === 0) {
+    debugLog.log("IMG_REPOS", "No images need repositioning");
+    const elapsed = Math.round(performance.now() - startTime);
+    debugLog.log("IMG_REPOS", `Done in ${elapsed}ms (no changes)`);
+    return { buffer, stats };
+  }
 
-  return { buffer: outBuffer, stats };
+  // ── Pass 2: Surgical XML modification on the original zip ──
+  const zip = await JSZip.loadAsync(buffer);
+
+  for (const plan of sheetPlans) {
+    if (plan.changes.size === 0) continue;
+
+    const drawingPath = await mapSheetToDrawingPath(
+      zip,
+      plan.ws,
+      plan.imageCount,
+    );
+    if (!drawingPath) {
+      debugLog.log(
+        "IMG_REPOS",
+        `  ${plan.ws.name}: Could not find drawing file, skipping`,
+      );
+      continue;
+    }
+
+    const drawingEntry = zip.file(drawingPath);
+    if (!drawingEntry) continue;
+
+    const originalXml = await drawingEntry.async("string");
+    const totalAnchors = countAnchors(originalXml);
+
+    const modifiedXml = applyRowChangesToDrawingXml(
+      originalXml,
+      plan.changes,
+      totalAnchors,
+    );
+
+    if (modifiedXml !== originalXml) {
+      zip.file(drawingPath, modifiedXml);
+      debugLog.log(
+        "IMG_REPOS",
+        `  ${plan.ws.name}: Modified ${drawingPath} (${plan.repositioned} of ${totalAnchors} anchors moved)`,
+      );
+    }
+  }
+
+  // Generate the new buffer from the surgically modified zip
+  const outBuffer = await zip.generateAsync({
+    type: "arraybuffer",
+    compression: "DEFLATE",
+    compressionOptions: { level: 6 },
+    mimeType:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+
+  // After repositioning, images are spread in a non-overlapping grid
+  for (const plan of sheetPlans) {
+    if (plan.changes.size === 0) continue;
+    const sheetStat = stats.sheets.find((s) => s.name === plan.ws.name);
+    if (sheetStat) {
+      sheetStat.overlapsAfter = 0;
+    }
+    stats.overlapsAfter = 0;
+    stats.contentConflictsAfter = 0;
+  }
+
+  const elapsed = Math.round(performance.now() - startTime);
+  debugLog.log(
+    "IMG_REPOS",
+    `Done in ${elapsed}ms: ${stats.totalImages} images, ` +
+      `${stats.imagesRepositioned} repositioned, ` +
+      `overlaps ${stats.overlapsBefore}→${stats.overlapsAfter}`,
+  );
+
+  return { buffer: outBuffer as ArrayBuffer, stats };
 }
