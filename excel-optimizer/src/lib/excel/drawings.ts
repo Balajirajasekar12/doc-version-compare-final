@@ -522,17 +522,46 @@ export async function fixDrawingOverlaps(
     return emptyStats;
   }
   const root = doc.documentElement!;
-  // Discover logical drawings — groups by r:embed, deduplicating
-  // mc:Choice + mc:Fallback that represent the same image.
-  const logicalDrawings = findLogicalDrawings(root);
-  if (logicalDrawings.length === 0) return emptyStats;
+
+  // Find ALL anchor elements, deduplicating mc:Choice/mc:Fallback pairs
+  // but keeping distinct anchors that share the same r:embed.
+  interface FoundAnchor {
+    anchor: XmlEl;
+    embedId: string;
+  }
+  function findAllAnchors(node: XmlEl): FoundAnchor[] {
+    const result: FoundAnchor[] = [];
+    for (let i = 0; i < node.childNodes.length; i++) {
+      const child = node.childNodes[i];
+      if (child.nodeType !== 1) continue;
+      const el = child as XmlEl;
+      const name = el.localName || el.nodeName;
+      if (name === "Choice" || name === "Fallback") {
+        // For mc:Choice/mc:Fallback, only process Choice (skip Fallback)
+        if (name === "Fallback") continue;
+        result.push(...findAllAnchors(el));
+        continue;
+      }
+      if (name === "AlternateContent") {
+        result.push(...findAllAnchors(el));
+        continue;
+      }
+      if (name === "twoCellAnchor" || name === "oneCellAnchor") {
+        const embedId = getAnchorEmbedId(el);
+        if (embedId) result.push({ anchor: el, embedId });
+      }
+    }
+    return result;
+  }
+  const allAnchors = findAllAnchors(root);
+  if (allAnchors.length === 0) return emptyStats;
 
   const geom = new DrawingGeometry(sheet);
   const rects: AnchorRect[] = [];
-  for (const drawing of logicalDrawings) {
-    const r = geom.parseAnchor(drawing.preferred);
+  for (let i = 0; i < allAnchors.length; i++) {
+    const r = geom.parseAnchor(allAnchors[i].anchor);
     if (r) {
-      r.index = drawing.index;
+      r.index = i;
       rects.push(r);
     }
   }
@@ -687,32 +716,35 @@ export async function fixDrawingOverlaps(
   // anchor's <from>/<to> blocks in the original string and replace
   // only the <row>/<rowOff> values.
   if (stats.imagesRepositioned > 0) {
+    // Build position map: each anchor is identified by its embedId + fromRow/col
+    // to handle multiple anchors sharing the same r:embed.
     const embedIdToNewPos = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number; fromCol: number; fromColOff: number }>();
-    for (const drawing of logicalDrawings) {
-      const rect = rects.find((r) => r.index === drawing.index);
-      // Check if this rect was moved (Y changed or X changed to column A).
-      const originalX1 = rect.x2 - rect.w; // original x1 = x2 - width
-      if (!rect || (rect.newY1 === rect.y1 && rect.x1 === originalX1)) {
-        console.log(`[SKIP] ${drawing.embedId} idx=${drawing.index} rect=${!!rect} newY1=${rect ? Math.round(rect.newY1) : '?'} y1=${rect ? Math.round(rect.y1) : '?'} x1=${rect ? Math.round(rect.x1) : '?'} origX1=${Math.round(originalX1)}`);
-        continue;
-      }
+    for (const rect of rects) {
+      const originalX1 = rect.x2 - rect.w;
+      if (rect.newY1 === rect.y1 && rect.x1 === originalX1) continue;
+      const anchor = allAnchors[rect.index];
+      if (!anchor) continue;
       const fromPos = geom.yToRow(rect.newY1);
       const fromRowOff = Math.max(0, Math.round(fromPos.off));
       const newY2 = rect.newY1 + rect.h;
       const toPos = geom.yToRow(newY2);
       const toRowOff = Math.max(0, Math.round(toPos.off));
-      // Column A = col 0 (1-based: 0), colOff = 0.
-      embedIdToNewPos.set(drawing.embedId, {
+      // Use embedId + original row as unique key to handle multiple anchors
+      // sharing the same r:embed.
+      const origRow = intOf(firstChildElement(firstChildElement(allAnchors[rect.index].anchor, 'from')!, 'row')!);
+      const key = `${anchor.embedId}@r${origRow}`;
+      embedIdToNewPos.set(key, {
         fromRow: fromPos.row, fromRowOff,
         toRow: toPos.row, toRowOff,
         newY: Math.round(rect.newY1),
         fromCol: 0, fromColOff: 0,
       });
-    }      console.log(`[FIX] embedIdToNewPos size=${embedIdToNewPos.size}, keys=[${Array.from(embedIdToNewPos.keys()).join(",")}]`);
+    }
+    debugLog.log("DRAWING", `  embedIdToNewPos size=${embedIdToNewPos.size}`);
     const modifiedXml = updateAnchorsString(originalXml, embedIdToNewPos);
     if (modifiedXml !== originalXml) {
       zip.file(drawingTarget, modifiedXml);
-      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget} (string-based, ${embedIdToNewPos.size} anchors updated)`);
+      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget} (${embedIdToNewPos.size} anchors updated)`);
     }
   }
 
@@ -1071,16 +1103,29 @@ function updateAnchorsString(
       const anchorClose = originalXml.indexOf(closeTag, anchorOpen);
       if (anchorClose === -1) break;
 
-      // Find embed ID within this anchor block.
+      // Find embed ID and from-row within this anchor block.
       const blockStr = originalXml.substring(anchorOpen, anchorClose + closeTag.length);
       const embedMatch = blockStr.match(/r:embed="([^"]+)"/);
-      if (embedMatch && embedIdToNewPos.has(embedMatch[1])) {
-        blocks.push({
-          open: anchorOpen,
-          close: anchorClose + closeTag.length,
-          embedId: embedMatch[1],
-          isTwoCell,
-        });
+      const fromRowMatch = blockStr.match(/<xdr:row>(\d+)<\/xdr:row>/);
+      if (embedMatch && fromRowMatch) {
+        // Build unique key: embedId@rROW to handle multiple anchors sharing r:embed
+        const key = `${embedMatch[1]}@r${fromRowMatch[1]}`;
+        if (embedIdToNewPos.has(key)) {
+          blocks.push({
+            open: anchorOpen,
+            close: anchorClose + closeTag.length,
+            embedId: key,
+            isTwoCell,
+          });
+        } else if (embedIdToNewPos.has(embedMatch[1])) {
+          // Fallback: old-style key (single anchor per embed)
+          blocks.push({
+            open: anchorOpen,
+            close: anchorClose + closeTag.length,
+            embedId: embedMatch[1],
+            isTwoCell,
+          });
+        }
       }
       pos = anchorClose + closeTag.length;
     }
