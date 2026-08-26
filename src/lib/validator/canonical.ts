@@ -171,7 +171,13 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
           parts.every(p =>
             p.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(p)
           );
-        if (!isHeader) {
+        // Multi-column table header: 3+ parts, all short alpha/numeric text.
+        // e.g. "Group | Total | Total Numberof Installment | Billed to Date | ..."
+        const isMultiColTable = parts.length > 2 &&
+          parts.every(p =>
+            p.length <= 35 && /^[A-Za-z][A-Za-z0-9 /-]*$/.test(p)
+          );
+        if (!isHeader && !isMultiColTable) {
           pairs.push({ field: parts[0], value: parts[1] });
           return pairs;
         }
@@ -230,7 +236,15 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
       // this is likely a header like "Field    Value", not business data.
       const isHeader = field.length <= 5 && value.length <= 5 &&
         /^[A-Za-z][A-Za-z ]*$/.test(field) && /^[A-Za-z][A-Za-z ]*$/.test(value);
-      if (!isHeader) {
+      // Label-label pair: both parts are alpha-only text that look like
+      // field labels (e.g., "Client Number    Client Name").
+      // A real value should contain digits, dates, currency, or be
+      // materially different from a label.
+      const isLabelLabel = /^[A-Za-z][A-Za-z ]+$/.test(field) &&
+        /^[A-Za-z][A-Za-z ]+$/.test(value) &&
+        !/[0-9]/.test(value) &&
+        value.length <= 40 && field.length <= 30;
+      if (!isHeader && !isLabelLabel) {
         pairs.push({ field, value });
       }
     }
@@ -891,39 +905,10 @@ export function compareCanonical(
     }
   }
 
-  // Phase 1b: Fuzzy key matching for remaining field_value items.
-  // When exact key matching fails (e.g., "numberof installment" vs "number of installment"),
-  // try matching by token overlap.
-  const unmatchedKVBase1b = Array.from(unmatchedBaseline)
-    .map(i => ({ el: baseline.items[i], idx: i }))
-    .filter(({ el, idx }) => (el.kind === "field_value" || el.kind === "heading") && !usedComparingKV.has(idx));
-  const unmatchedKVComp1b = Array.from(unmatchedComparing)
-    .map(i => ({ el: comparing.items[i], idx: i }))
-    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
-
-  for (const { el: bEl, idx: bIdx } of unmatchedKVBase1b) {
-    if (!unmatchedBaseline.has(bIdx)) continue;
-    let bestFuzzy: { el: ContentItem; idx: number; score: number } | null = null;
-    for (const { el: cEl, idx: cIdx } of unmatchedKVComp1b) {
-      if (!unmatchedComparing.has(cIdx)) continue;
-      if (keysFuzzyMatch(bEl.key, cEl.key)) {
-        // Prefer the match with the most similar value
-        const valScore = valuesEqual(bEl.value, cEl.value) ? 2 : 1;
-        if (!bestFuzzy || valScore > bestFuzzy.score) {
-          bestFuzzy = { el: cEl, idx: cIdx, score: valScore };
-        }
-      }
-    }
-    if (bestFuzzy) {
-      matched.push({
-        baseline: bEl,
-        comparing: bestFuzzy.el,
-        identical: valuesEqual(bEl.value, bestFuzzy.el.value),
-      });
-      unmatchedBaseline.delete(bIdx);
-      unmatchedComparing.delete(bestFuzzy.idx);
-    }
-  }
+  // Phase 1b: REMOVED — fuzzy key matching at 70% threshold created false
+  // VALUE_MISMATCHES by matching keys like "advance deposit" to "advance deposit
+  // total" when the values were completely different. Cross-format content dedup
+  // (Phase 8) handles this correctly instead.
 
   // Phase 2: Match remaining items by normalized text content.
   // Handles paragraphs, list_items, and any unmatched items.
@@ -1428,6 +1413,70 @@ export function compareCanonical(
         for (const { idx: bIdx } of matchingBase) {
           unmatchedBaseline.delete(bIdx);
         }
+      }
+    }
+  }
+
+  // Phase 8: Comprehensive cross-format content dedup.
+  // Catches remaining unmatched items where different formats produced different
+  // structural representations of the same content (swapped key/value, wrong
+  // pairings, format artifacts). Computes word-level similarity across ALL
+  // text of each item (key + label + value).
+  {
+    function contentWords(el: ContentItem): Set<string> {
+      const raw = `${el.key} ${normalizeKey(el.label)} ${normalizeText(el.value)}`.toLowerCase();
+      return new Set(raw.split(/[^a-z0-9]+/).filter(t => t.length > 1));
+    }
+
+    function wordOverlap(a: Set<string>, b: Set<string>): number {
+      if (a.size === 0 || b.size === 0) return 0;
+      let inter = 0;
+      for (const w of a) if (b.has(w)) inter++;
+      return inter / Math.min(a.size, b.size);
+    }
+
+    const unmatchedBaseArr8 = Array.from(unmatchedBaseline)
+      .map(i => ({ el: baseline.items[i], idx: i }));
+    const unmatchedCompArr8 = Array.from(unmatchedComparing)
+      .map(i => ({ el: comparing.items[i], idx: i }));
+
+    // Pre-compute word sets
+    const baseWordSets = new Map<number, Set<string>>();
+    for (const { el, idx } of unmatchedBaseArr8) baseWordSets.set(idx, contentWords(el));
+    const compWordSets = new Map<number, Set<string>>();
+    for (const { el, idx } of unmatchedCompArr8) compWordSets.set(idx, contentWords(el));
+
+    // For each unmatched baseline item, find the best matching comparing item
+    for (const { el: bEl, idx: bIdx } of unmatchedBaseArr8) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      const bWords = baseWordSets.get(bIdx)!;
+      if (bWords.size < 2) continue;
+
+      let bestMatch: { idx: number; score: number } | null = null;
+      for (const { idx: cIdx } of unmatchedCompArr8) {
+        if (!unmatchedComparing.has(cIdx)) continue;
+        const cWords = compWordSets.get(cIdx)!;
+        if (cWords.size < 2) continue;
+        const overlap = wordOverlap(bWords, cWords);
+        if (overlap >= 0.5) {
+          // Prefer exact value match, then higher overlap
+          const valMatch = valuesEqual(bEl.value, comparing.items[cIdx].value) ? 10 : 0;
+          const score = valMatch + overlap;
+          if (!bestMatch || score > bestMatch.score) {
+            bestMatch = { idx: cIdx, score };
+          }
+        }
+      }
+      if (bestMatch) {
+        const cEl = comparing.items[bestMatch.idx];
+        matched.push({
+          baseline: bEl,
+          comparing: cEl,
+          identical: valuesEqual(bEl.value, cEl.value) ||
+                     wordOverlap(bWords, contentWords(cEl)) >= 0.8,
+        });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(bestMatch.idx);
       }
     }
   }
