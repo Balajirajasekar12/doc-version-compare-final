@@ -293,7 +293,7 @@ function insertRowsInWorksheet(
   const cellMapping = new Map<string, string>(); // old ref -> new ref
   let result = worksheetXml;
 
-  // Update row numbers: <row r="N"> where N >= insertAtRow → N + rowsToInsert
+  // Update row numbers: <row r="N"> where N >= insertAtRow -> N + rowsToInsert
   // Process from bottom to top to avoid index invalidation.
   const rowRegex = /<row\s[^>]*\br="(\d+)"/g;
   const rowMatches: Array<{ start: number; end: number; rowNum: number }> = [];
@@ -576,12 +576,10 @@ export async function fixDrawingOverlaps(
   stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
 
   // Calculate how many rows to insert if gap is too small for all images.
-  // Each image needs its height in rows + spacing.
-  const SPACING_ROWS = 2; // spacing between images in rows
+  const SPACING_ROWS = 2;
   let totalRowsNeeded = 0;
   for (const r of rects) {
-    // Convert image height (EMU) to approximate rows.
-    const imageHeightRows = Math.ceil(r.h / (15 * 12700)); // default 15pt row height
+    const imageHeightRows = Math.ceil(r.h / (15 * 12700));
     totalRowsNeeded += imageHeightRows + SPACING_ROWS;
   }
   const gapRowsAvailable = gapInfo.gapRows;
@@ -590,11 +588,8 @@ export async function fixDrawingOverlaps(
   // Cell mapping: tracks how cell references shift due to row insertion.
   let cellMapping = new Map<string, string>();
 
-  // Only insert rows when there IS a gap between content blocks.
-  // If no gap exists (content is contiguous), images go after the last content row.
   if (rowsToInsert > 0 && gapInfo.gapRows > 0) {
     debugLog.log("DRAWING", `  gap too small: need ${totalRowsNeeded} rows, have ${gapRowsAvailable}, inserting ${rowsToInsert}`);
-    // Insert rows in the worksheet XML.
     const sheetXml = await readEntryText(zip, sheetFile);
     if (sheetXml && typeof sheetXml === "string") {
       const { xml: modifiedSheetXml, cellMapping: mapping } = insertRowsInWorksheet(sheetXml, gapInfo.gapStartRow, rowsToInsert);
@@ -741,7 +736,6 @@ export async function fixDrawingOverlaps(
     }
   }
 
-  // Attach cell mapping to stats so the validator can adjust cell references.
   stats.cellMapping = cellMapping;
 
   return stats;
