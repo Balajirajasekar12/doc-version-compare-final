@@ -279,6 +279,204 @@ function normalizeRelTarget(dir: string, target: string): string {
  *
  * Returns detailed optimization statistics for the report.
  */
+/**
+ * Inserts empty rows in the worksheet XML to push content down.
+ * This creates space for images between content blocks.
+ *
+ * For each row element with row number >= insertAtRow, the row number
+ * is incremented by rowsToInsert. Cell references are also updated.
+ */
+function insertRowsInWorksheet(
+  worksheetXml: string,
+  insertAtRow: number,
+  rowsToInsert: number,
+): string {
+  if (rowsToInsert <= 0) return worksheetXml;
+
+  let result = worksheetXml;
+
+  // Update row numbers: <row r="N"> where N >= insertAtRow → N + rowsToInsert
+  // Process from bottom to top to avoid index invalidation.
+  const rowRegex = /<row\s[^>]*\br="(\d+)"/g;
+  const rowMatches: Array<{ start: number; end: number; rowNum: number }> = [];
+  let m;
+  while ((m = rowRegex.exec(result)) !== null) {
+    const rowNum = parseInt(m[1]);
+    if (rowNum >= insertAtRow) {
+      rowMatches.push({ start: m.index, end: m.index + m[0].length, rowNum });
+    }
+  }
+  // Process bottom to top.
+  for (let i = rowMatches.length - 1; i >= 0; i--) {
+    const match = rowMatches[i];
+    const newRowNum = match.rowNum + rowsToInsert;
+    const oldTag = `r="${match.rowNum}"`;
+    const newTag = `r="${newRowNum}"`;
+    const originalSegment = result.substring(match.start, match.end);
+    result = result.substring(0, match.start) +
+      originalSegment.replace(oldTag, newTag) +
+      result.substring(match.end);
+  }
+
+  // Update cell references: <c r="A123"> where row >= insertAtRow
+  const cellRegex = /<c\s[^>]*\br="([A-Z]+)(\d+)"/g;
+  const cellMatches: Array<{ start: number; end: number; col: string; rowNum: number }> = [];
+  while ((m = cellRegex.exec(result)) !== null) {
+    const rowNum = parseInt(m[2]);
+    if (rowNum >= insertAtRow) {
+      cellMatches.push({ start: m.index, end: m.index + m[0].length, col: m[1], rowNum });
+    }
+  }
+  for (let i = cellMatches.length - 1; i >= 0; i--) {
+    const match = cellMatches[i];
+    const newRowNum = match.rowNum + rowsToInsert;
+    const oldRef = `${match.col}${match.rowNum}`;
+    const newRef = `${match.col}${newRowNum}`;
+    const originalSegment = result.substring(match.start, match.end);
+    result = result.substring(0, match.start) +
+      originalSegment.replace(oldRef, newRef) +
+      result.substring(match.end);
+  }
+
+  debugLog.log("DRAWING", `insertRowsInWorksheet: inserted ${rowsToInsert} rows at row ${insertAtRow}`);
+  return result;
+}
+
+/**
+ * Processes VML drawings to move images below content.
+ * VML drawings use a different format than regular drawing XML:
+ *   <x:Anchor>fromCol, fromColOff, fromRow, fromRowOff, toCol, toColOff, toRow, toRowOff</x:Anchor>
+ *   style='...margin-left:LEFTpt;margin-top:TOPpt...'
+ *
+ * VML shapes reference images via o:relid="rIdN".
+ */
+async function processVmlDrawings(
+  zip: Zip,
+  sheetFile: string,
+  sheet: ParsedSheet,
+  contentBoundaryRow: number,
+): Promise<number> {
+  // Find VML drawing from sheet rels.
+  const rels = await resolveSheetRels(zip, sheetFile);
+  let vmlTarget: string | null = null;
+  for (const rel of rels.values()) {
+    if (rel.type.includes("vmlDrawing")) {
+      vmlTarget = rel.target;
+      break;
+    }
+  }
+  if (!vmlTarget) return 0;
+
+  const vmlXml = await readEntryText(zip, vmlTarget);
+  if (!vmlXml || typeof vmlXml !== "string") return 0;
+
+  // Check if there are any shapes with imagedata.
+  if (!vmlXml.includes("imagedata")) return 0;
+
+  const geom = new DrawingGeometry(sheet);
+  let moved = 0;
+
+  // Find content boundary row (0-based for geometry).
+  // contentBoundaryRow is 1-based XML row number.
+  const boundaryY = geom.rowStart(contentBoundaryRow - 1);
+  let nextAvailableY = boundaryY + SPACING_PX * EMU_PER_PX;
+
+  // Process each <v:shape> with <v:imagedata>.
+  // Use regex to find and update each shape individually.
+  const shapeRegex = /(<v:shape[^>]*>)([\s\S]*?)(<\/v:shape>)/g;
+  let result = vmlXml;
+  let m;
+
+  // Process shapes from bottom to top to avoid index invalidation.
+  const shapes: Array<{ start: number; end: number; block: string }> = [];
+  while ((m = shapeRegex.exec(vmlXml)) !== null) {
+    const fullBlock = m[0];
+    if (fullBlock.includes("imagedata")) {
+      shapes.push({
+        start: m.index,
+        end: m.index + fullBlock.length,
+        block: fullBlock,
+      });
+    }
+  }
+
+  // Sort bottom to top.
+  shapes.sort((a, b) => b.start - a.start);
+
+  for (const shape of shapes) {
+    const block = shape.block;
+
+    // Parse the <x:Anchor> values.
+    const anchorMatch = block.match(/<x:Anchor>\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\s*<\/x:Anchor>/);
+    if (!anchorMatch) continue;
+
+    const fromCol = parseInt(anchorMatch[1]);
+    const fromColOff = parseInt(anchorMatch[2]);
+    const fromRow = parseInt(anchorMatch[3]);
+    const fromRowOff = parseInt(anchorMatch[4]);
+    const toCol = parseInt(anchorMatch[5]);
+    const toColOff = parseInt(anchorMatch[6]);
+    const toRow = parseInt(anchorMatch[7]);
+    const toRowOff = parseInt(anchorMatch[8]);
+
+    // Check if this shape overlaps content (row < contentBoundaryRow).
+    if (fromRow >= contentBoundaryRow) continue; // already below content
+
+    // Calculate new position: place below content.
+    // Image height in EMU from row height difference.
+    const fromY = geom.rowStart(fromRow - 1) + fromRowOff;
+    const toY = geom.rowStart(toRow - 1) + toRowOff;
+    const imageHeight = toY - fromY;
+
+    // Place at next available Y.
+    const newY1 = Math.max(fromY, nextAvailableY);
+    const newY2 = newY1 + imageHeight;
+
+    // Convert back to row/rowOff (1-based).
+    const newPos1 = geom.yToRow(newY1);
+    const newPos2 = geom.yToRow(newY2);
+
+    // Column A: col=0, colOff=0.
+    const newFromCol = 0;
+    const newFromColOff = 0;
+    const newToCol = 0;
+    const newToColOff = 0; // approximate: toCol depends on width
+
+    // Update the <x:Anchor> block using regex (whitespace may vary).
+    const newAnchorStr = `${newFromCol}, ${newFromColOff}, ${newPos1.row}, ${Math.round(newPos1.off)}, ${newToCol}, ${newToColOff}, ${newPos2.row}, ${Math.round(newPos2.off)}`;
+    let updatedBlock = block.replace(
+      /<x:Anchor>[\s\S]*?<\/x:Anchor>/,
+      `<x:Anchor>${newAnchorStr}</x:Anchor>`,
+    );
+
+    // Update CSS margin-top (in points).
+    const newMarginTopPt = Math.round(newY1 / 12700); // EMU to points
+    updatedBlock = updatedBlock.replace(
+      /margin-top:[\d.]+pt/,
+      `margin-top:${newMarginTopPt}pt`,
+    );
+
+    // Update CSS margin-left (column A = 0pt).
+    updatedBlock = updatedBlock.replace(
+      /margin-left:[\d.]+pt/,
+      `margin-left:0pt`,
+    );
+
+    // Replace in result.
+    result = result.substring(0, shape.start) + updatedBlock + result.substring(shape.end);
+
+    nextAvailableY = newY2 + SPACING_PX * EMU_PER_PX;
+    moved++;
+  }
+
+  if (moved > 0) {
+    zip.file(vmlTarget, result);
+    debugLog.log("DRAWING", `  processVmlDrawings: moved ${moved} VML shapes below content in ${vmlTarget}`);
+  }
+
+  return moved;
+}
+
 export async function fixDrawingOverlaps(
   zip: Zip,
   sheet: ParsedSheet,
@@ -368,9 +566,37 @@ export async function fixDrawingOverlaps(
     anchors: anchorInfos,
   };
 
-  // Calculate content boundary.
-  const contentBoundaryY = computeContentBoundary(sheet, geom);
+  // Find the first content gap (space between tables).
+  const gapInfo = findFirstContentGap(sheet, geom);
+  const contentBoundaryY = gapInfo.startY;
   stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
+
+  // Calculate how many rows to insert if gap is too small for all images.
+  // Each image needs its height in rows + spacing.
+  const SPACING_ROWS = 2; // spacing between images in rows
+  let totalRowsNeeded = 0;
+  for (const r of rects) {
+    // Convert image height (EMU) to approximate rows.
+    const imageHeightRows = Math.ceil(r.h / (15 * 12700)); // default 15pt row height
+    totalRowsNeeded += imageHeightRows + SPACING_ROWS;
+  }
+  const gapRowsAvailable = gapInfo.gapRows;
+  const rowsToInsert = Math.max(0, totalRowsNeeded - gapRowsAvailable);
+
+  // Only insert rows when there IS a gap between content blocks.
+  // If no gap exists (content is contiguous), images go after the last content row.
+  if (rowsToInsert > 0 && gapInfo.gapRows > 0) {
+    debugLog.log("DRAWING", `  gap too small: need ${totalRowsNeeded} rows, have ${gapRowsAvailable}, inserting ${rowsToInsert}`);
+    // Insert rows in the worksheet XML.
+    const sheetXml = await readEntryText(zip, sheetFile);
+    if (sheetXml && typeof sheetXml === "string") {
+      const modifiedSheetXml = insertRowsInWorksheet(sheetXml, gapInfo.gapStartRow, rowsToInsert);
+      if (modifiedSheetXml !== sheetXml) {
+        zip.file(sheetFile, modifiedSheetXml);
+        debugLog.log("DRAWING", `  Inserted ${rowsToInsert} rows at row ${gapInfo.gapStartRow} in ${sheetFile}`);
+      }
+    }
+  }
 
   // Mark which anchors overlap content.
   for (let i = 0; i < rects.length; i++) {
@@ -398,17 +624,12 @@ export async function fixDrawingOverlaps(
     debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} overlapsContent=${ai.overlapsContent} overlapsWith=[${ai.overlapsWith.join(",")}]`);
   }
 
-  // NOTE: pushBelowContentSmart intentionally disabled.
-  // Screenshots may be intentionally positioned over worksheet content.
-  // Only image↔image collisions should be resolved by spreadRects.
-  // Content overlap is not an error — it's a valid layout choice.
+  // Phase 2: Push images that overlap content below the content boundary.
+  // Images are placed in document-flow order below the content, with spacing.
+  const movedByContentPush = pushBelowContentSmart(rects, contentBoundaryY, geom);
+  debugLog.log("DRAWING", `  pushBelowContentSmart: ${movedByContentPush} images pushed below content`);
 
-  // Phase 2: Group nearby images and arrange in grid layout.
-  const movedByGrouping = groupAndArrange(rects, contentBoundaryY, geom);
-  stats.imagesGrouped = movedByGrouping.grouped;
-  debugLog.log("DRAWING", `  groupAndArrange: ${movedByGrouping.grouped} images grouped, ${movedByGrouping.repositioned} repositioned`);
-
-  // Phase 3: Spread any remaining overlapping images.
+  // Phase 3: Spread any remaining overlapping images (image↔image).
   const movedBySpreading = spreadRects(rects);
   debugLog.log("DRAWING", `  spreadRects: ${movedBySpreading} images spread`);
 
@@ -432,6 +653,7 @@ export async function fixDrawingOverlaps(
         if (blockers.length === 0) break;
         y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
         foundOverlap = true;
+        debugLog.log("DRAWING", `  safety: #${r.index} blocked by #${blockers.map(p=>p.index).join(',')} at y=${y}`);
       }
       r.newY1 = y;
       placed.push(r);
@@ -444,7 +666,8 @@ export async function fixDrawingOverlaps(
   // Phase 5: Count final stats.
   stats.overlapsAfter = countOverlaps(rects);
   stats.contentConflictsAfter = countContentConflicts(rects, contentBoundaryY);
-  stats.imagesRepositioned = rects.filter((r) => r.newY1 !== r.y1).length;
+  // Track whether x position changed too (for column A migration).
+  stats.imagesRepositioned = rects.filter((r) => r.newY1 !== r.y1 || r.x1 !== (r.x2 - r.w)).length;
   stats.imagesResized = rects.filter((r) => {
     const newW = r.w;
     const newH = r.h;
@@ -461,25 +684,52 @@ export async function fixDrawingOverlaps(
   // anchor's <from>/<to> blocks in the original string and replace
   // only the <row>/<rowOff> values.
   if (stats.imagesRepositioned > 0) {
-    const embedIdToNewRows = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number }>();
+    const embedIdToNewPos = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number; fromCol: number; fromColOff: number }>();
     for (const drawing of logicalDrawings) {
       const rect = rects.find((r) => r.index === drawing.index);
-      if (!rect || rect.newY1 === rect.y1) continue;
+      // Check if this rect was moved (Y changed or X changed to column A).
+      const originalX1 = rect.x2 - rect.w; // original x1 = x2 - width
+      if (!rect || (rect.newY1 === rect.y1 && rect.x1 === originalX1)) {
+        console.log(`[SKIP] ${drawing.embedId} idx=${drawing.index} rect=${!!rect} newY1=${rect ? Math.round(rect.newY1) : '?'} y1=${rect ? Math.round(rect.y1) : '?'} x1=${rect ? Math.round(rect.x1) : '?'} origX1=${Math.round(originalX1)}`);
+        continue;
+      }
       const fromPos = geom.yToRow(rect.newY1);
       const fromRowOff = Math.max(0, Math.round(fromPos.off));
       const newY2 = rect.newY1 + rect.h;
       const toPos = geom.yToRow(newY2);
       const toRowOff = Math.max(0, Math.round(toPos.off));
-      embedIdToNewRows.set(drawing.embedId, {
+      // Column A = col 0 (1-based: 0), colOff = 0.
+      embedIdToNewPos.set(drawing.embedId, {
         fromRow: fromPos.row, fromRowOff,
         toRow: toPos.row, toRowOff,
         newY: Math.round(rect.newY1),
+        fromCol: 0, fromColOff: 0,
       });
-    }
-    const modifiedXml = updateAnchorsString(originalXml, embedIdToNewRows);
+    }      console.log(`[FIX] embedIdToNewPos size=${embedIdToNewPos.size}, keys=[${Array.from(embedIdToNewPos.keys()).join(",")}]`);
+    const modifiedXml = updateAnchorsString(originalXml, embedIdToNewPos);
     if (modifiedXml !== originalXml) {
       zip.file(drawingTarget, modifiedXml);
-      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget} (string-based, ${embedIdToNewRows.size} anchors updated)`);
+      debugLog.log("DRAWING", `  Wrote corrected drawing XML to ${drawingTarget} (string-based, ${embedIdToNewPos.size} anchors updated)`);
+    }
+  }
+
+  // Phase 6: Process VML drawings to move their images below content too.
+  // VML drawings (vmlDrawingN.vml) contain additional image shapes that
+  // are separate from the regular drawing XML. These also need repositioning.
+  // Find the last content row to pass as the content boundary.
+  let maxContentRow = 0;
+  for (const [row, cells] of sheet.cells) {
+    for (const cell of cells.values()) {
+      if ((cell.text ?? "").trim()) {
+        if (row > maxContentRow) maxContentRow = row;
+        break;
+      }
+    }
+  }
+  if (maxContentRow > 0) {
+    const vmlMoved = await processVmlDrawings(zip, sheetFile, sheet, maxContentRow + 1);
+    if (vmlMoved > 0) {
+      debugLog.log("DRAWING", `  VML: ${vmlMoved} shapes moved below content`);
     }
   }
 
@@ -524,6 +774,55 @@ function rectsOverlap(
 }
 
 /**
+ * Finds the first content gap (empty rows between two content blocks).
+ * Returns the Y position where images should start, and the gap info.
+ * If no gap exists, returns the position after the last content row.
+ */
+function findFirstContentGap(
+  sheet: ParsedSheet,
+  geom: DrawingGeometry,
+): { startY: number; gapStartRow: number; gapRows: number } {
+  // Find all content rows.
+  const contentRows = new Set<number>();
+  for (const [row, cells] of sheet.cells) {
+    for (const cell of cells.values()) {
+      if (cell.text?.trim()) {
+        contentRows.add(row);
+        break;
+      }
+    }
+  }
+
+  // Sort content rows.
+  const sorted = Array.from(contentRows).sort((a, b) => a - b);
+  if (sorted.length === 0) return { startY: 0, gapStartRow: 1, gapRows: 0 };
+
+  // Find first USABLE gap between content blocks.
+  // A gap must be at least 3 rows to be useful for placing images.
+  // Small gaps (1-2 rows between header and data) are not usable.
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const currentRow = sorted[i];
+    const nextRow = sorted[i + 1];
+    if (nextRow - currentRow > 3) {
+      // Found a usable gap.
+      const gapStartRow = currentRow + 1;
+      const gapEndRow = nextRow - 1;
+      const gapRows = gapEndRow - gapStartRow + 1;
+      const startY = geom.rowStart(gapStartRow - 1);
+      debugLog.log("DRAWING", `findFirstContentGap: gap at rows ${gapStartRow}-${gapEndRow} (${gapRows} rows), startY=${startY}`);
+      return { startY, gapStartRow, gapRows };
+    }
+  }
+
+  // No usable gap found — use position after ALL content.
+  // This ensures images are placed below all content, not inside it.
+  const lastRow = sorted[sorted.length - 1];
+  const startY = geom.rowStart(lastRow);
+  debugLog.log("DRAWING", `findFirstContentGap: no usable gap, placing below row ${lastRow}, startY=${startY}`);
+  return { startY, gapStartRow: lastRow + 1, gapRows: 0 };
+}
+
+/**
  * Computes the EMU Y position of the last row with non-empty content.
  */
 function computeContentBoundary(sheet: ParsedSheet, geom: DrawingGeometry): number {
@@ -543,27 +842,48 @@ function computeContentBoundary(sheet: ParsedSheet, geom: DrawingGeometry): numb
 }
 
 /**
- * Smart push below content: only pushes images that ACTUALLY overlap
- * with the content boundary. Images that are already below content
- * are left untouched.
+ * Smart push below content: pushes images that overlap content below
+ * the first content gap in document-flow order.
+ *
+ * Algorithm:
+ *   1. Find the first content gap (space between two content blocks)
+ *   2. Sort images by original Y position (top-to-bottom)
+ *   3. Move ALL images to column A (col=0)
+ *   4. Place images in the gap, stacked vertically
+ *   5. If gap is too small, images extend beyond (caller inserts rows)
+ *
+ * This preserves relative ordering and ensures no image overlaps content.
  */
 function pushBelowContentSmart(
   rects: AnchorRect[],
   contentBoundaryY: number,
-  _geom: DrawingGeometry,
+  geom: DrawingGeometry,
 ): number {
   if (rects.length === 0 || contentBoundaryY === 0) return 0;
 
+  // Sort by original Y position (top-to-bottom).
+  const sorted = [...rects].sort((a, b) => a.y1 - b.y1 || a.x1 - b.x1);
+
   let moved = 0;
-  for (const r of rects) {
-    const imageBottom = r.y1 + r.h;
-    // Only push images whose TOP is above the content boundary AND
-    // whose bottom extends into the content area.
-    if (r.y1 < contentBoundaryY && imageBottom > r.y1) {
-      const newY = contentBoundaryY + SPACING_PX * EMU_PER_PX;
-      r.newY1 = newY;
+  // Place images starting at the content boundary (first gap position).
+  let nextAvailableY = contentBoundaryY + SPACING_PX * EMU_PER_PX;
+
+  for (const r of sorted) {
+    // Move ALL images to the gap area, starting at column A.
+    // Place at next available Y position, stacked vertically.
+    const candidateY = Math.max(r.y1, nextAvailableY);
+    console.log(`[PUSH] idx=${r.index} y1=${Math.round(r.y1)} x1=${Math.round(r.x1)} candidateY=${Math.round(candidateY)} nextAvail=${Math.round(nextAvailableY)}`);
+    if (candidateY !== r.y1 || r.x1 !== 0) {
+      r.newY1 = candidateY;
+      // Force column A: set x1 to 0, x2 to width (preserving original width).
+      // This ensures all screenprints start from column A.
+      const originalWidth = r.x2 - r.x1;
+      r.x1 = 0;
+      r.x2 = originalWidth;
       moved++;
     }
+    // The next image must start below this one.
+    nextAvailableY = r.newY1 + r.h + SPACING_PX * EMU_PER_PX;
   }
   return moved;
 }
@@ -677,6 +997,7 @@ function spreadRects(rects: AnchorRect[]): number {
       );
       if (blockers.length === 0) break;
       y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
+
     }
     if (y !== r.y1) moved++;
     r.newY1 = y;
@@ -701,9 +1022,9 @@ function spreadRects(rects: AnchorRect[]): number {
  */
 function updateAnchorsString(
   originalXml: string,
-  embedIdToNewRows: Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number }>,
+  embedIdToNewPos: Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number; fromCol: number; fromColOff: number }>,
 ): string {
-  if (embedIdToNewRows.size === 0) return originalXml;
+  if (embedIdToNewPos.size === 0) return originalXml;
 
   // Detect the namespace prefix used for drawing elements (xdr:, a:, or none).
   let pfx = "xdr:";
@@ -748,7 +1069,7 @@ function updateAnchorsString(
       // Find embed ID within this anchor block.
       const blockStr = originalXml.substring(anchorOpen, anchorClose + closeTag.length);
       const embedMatch = blockStr.match(/r:embed="([^"]+)"/);
-      if (embedMatch && embedIdToNewRows.has(embedMatch[1])) {
+      if (embedMatch && embedIdToNewPos.has(embedMatch[1])) {
         blocks.push({
           open: anchorOpen,
           close: anchorClose + closeTag.length,
@@ -771,8 +1092,8 @@ function updateAnchorsString(
   blocks.sort((a, b) => b.open - a.open);
 
   for (const block of blocks) {
-    const newRows = embedIdToNewRows.get(block.embedId);
-    if (!newRows) continue;
+    const newPos = embedIdToNewPos.get(block.embedId);
+    if (!newPos) continue;
 
     const anchorBlock = result.substring(block.open, block.close);
 
@@ -796,7 +1117,7 @@ function updateAnchorsString(
         const rowEnd = updatedFrom.indexOf(rowClose, rowIdx);
         if (rowEnd !== -1) {
           updatedFrom = updatedFrom.substring(0, rowIdx + rowOpen.length) +
-            String(newRows.fromRow) + updatedFrom.substring(rowEnd);
+            String(newPos.fromRow) + updatedFrom.substring(rowEnd);
         }
       }
       const rowOffIdx = updatedFrom.indexOf(rowOffOpen);
@@ -804,7 +1125,28 @@ function updateAnchorsString(
         const rowOffEnd = updatedFrom.indexOf(rowOffClose, rowOffIdx);
         if (rowOffEnd !== -1) {
           updatedFrom = updatedFrom.substring(0, rowOffIdx + rowOffOpen.length) +
-            String(newRows.fromRowOff) + updatedFrom.substring(rowOffEnd);
+            String(newPos.fromRowOff) + updatedFrom.substring(rowOffEnd);
+        }
+      }
+      // Update <col>/<colOff> to move image to column A.
+      const colOpen = `<${tag("col")}>`;
+      const colClose = `</${tag("col")}>`;
+      const colOffOpen = `<${tag("colOff")}>`;
+      const colOffClose = `</${tag("colOff")}>`;
+      const colIdx = updatedFrom.indexOf(colOpen);
+      if (colIdx !== -1) {
+        const colEnd = updatedFrom.indexOf(colClose, colIdx);
+        if (colEnd !== -1) {
+          updatedFrom = updatedFrom.substring(0, colIdx + colOpen.length) +
+            String(newPos.fromCol) + updatedFrom.substring(colEnd);
+        }
+      }
+      const colOffIdx = updatedFrom.indexOf(colOffOpen);
+      if (colOffIdx !== -1) {
+        const colOffEnd = updatedFrom.indexOf(colOffClose, colOffIdx);
+        if (colOffEnd !== -1) {
+          updatedFrom = updatedFrom.substring(0, colOffIdx + colOffOpen.length) +
+            String(newPos.fromColOff) + updatedFrom.substring(colOffEnd);
         }
       }
       updatedBlock = anchorBlock.substring(0, fromOpen) +
@@ -829,7 +1171,7 @@ function updateAnchorsString(
           const rowEnd = updatedTo.indexOf(rowClose, rowIdx);
           if (rowEnd !== -1) {
             updatedTo = updatedTo.substring(0, rowIdx + rowOpen.length) +
-              String(newRows.toRow) + updatedTo.substring(rowEnd);
+              String(newPos.toRow) + updatedTo.substring(rowEnd);
           }
         }
         const rowOffIdx = updatedTo.indexOf(rowOffOpen);
@@ -837,7 +1179,7 @@ function updateAnchorsString(
           const rowOffEnd = updatedTo.indexOf(rowOffClose, rowOffIdx);
           if (rowOffEnd !== -1) {
             updatedTo = updatedTo.substring(0, rowOffIdx + rowOffOpen.length) +
-              String(newRows.toRowOff) + updatedTo.substring(rowOffEnd);
+              String(newPos.toRowOff) + updatedTo.substring(rowOffEnd);
           }
         }
         updatedBlock = updatedBlock.substring(0, toOpen) +
@@ -845,7 +1187,7 @@ function updateAnchorsString(
       }
     }
 
-    // Update <a:off y> inside <xdr:spPr><a:xfrm> to match the new anchor position.
+    // Update <a:off x> and <a:off y> inside <xdr:spPr><a:xfrm> to match the new anchor position.
     // Some viewers/renderers use this absolute position independently of <xdr:from>.
     const spPrTag = `<${tag("spPr")}>`;
     const xfrmTag = `<a:xfrm>`;
@@ -856,15 +1198,25 @@ function updateAnchorsString(
       if (xfrmIdx !== -1) {
         const offIdx = updatedBlock.indexOf(offTag, xfrmIdx);
         if (offIdx !== -1) {
-          // Find y="..." attribute in <a:off ... y="..."/>
+          // Update x="..." attribute (column A = 0 EMU).
+          const xAttrRegex = /x="([^"]+)"/;
+          const xMatch = updatedBlock.substring(offIdx).match(xAttrRegex);
+          if (xMatch) {
+            const xAttrStart = offIdx + xMatch.index!;
+            const xValueStart = xAttrStart + 3;
+            const xValueEnd = xValueStart + xMatch[1].length;
+            updatedBlock = updatedBlock.substring(0, xValueStart) +
+              "0" + updatedBlock.substring(xValueEnd);
+          }
+          // Update y="..." attribute.
           const yAttrRegex = /y="([^"]+)"/;
           const yMatch = updatedBlock.substring(offIdx).match(yAttrRegex);
           if (yMatch) {
             const yAttrStart = offIdx + yMatch.index!;
-            const yValueStart = yAttrStart + 3; // skip 'y="' (3 chars: y, =, ")
+            const yValueStart = yAttrStart + 3;
             const yValueEnd = yValueStart + yMatch[1].length;
             updatedBlock = updatedBlock.substring(0, yValueStart) +
-              String(newRows.newY) + updatedBlock.substring(yValueEnd);
+              String(newPos.newY) + updatedBlock.substring(yValueEnd);
           }
         }
       }

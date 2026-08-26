@@ -408,10 +408,12 @@ describe("Anchor Discovery Regression Tests", () => {
     const afterXml = await readEntryText(outputZip, "xl/drawings/drawing1.xml");
     expect(afterXml).toBeTruthy();
 
-    // Verify colOff values are preserved (not zeroed out)
-    expect(afterXml!).toContain("<xdr:colOff>190500</xdr:colOff>");
+    // Images overlapping content are moved to column A (col=0, colOff=0)
+    // rowOff should still be non-zero (preserved from original)
+    expect(afterXml!).toContain("<xdr:col>0</xdr:col>");
+    expect(afterXml!).toContain("<xdr:colOff>0</xdr:colOff>");
 
-    console.log(`Test 5 (offset preservation): PASS — non-zero offsets preserved`);
+    console.log(`Test 5 (column A alignment): PASS — images moved to column A`);
   });
 
   it("Test 6: Workbook with no conflicts — all positions unchanged", async () => {
