@@ -111,24 +111,27 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
   const pairs: Array<{ field: string; value: string }> = [];
   const trimmed = text.trim();
 
-  // Pattern 1: Pipe-delimited — "Field | Value" or "Field | Value | Extra"
-  // But ONLY if the first part doesn't contain a colon (which would mean
-  // it's a sentence like "Account: 1000 | Synthetic data" with pipes as
-  // visual separators, not a table row).
+  // Pattern 1: Pipe-delimited — "Field | Value"
+  // Multi-column rows (3+ parts) are table data, not field/value pairs.
   if (trimmed.includes("|")) {
     const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
     if (parts.length >= 2) {
       // If first part has a colon, this is a sentence with pipe separators.
-      // Fall through to colon/other extraction patterns below.
       if (!parts[0].includes(":")) {
-        // Check if this is a header row (all alpha-only, short)
-        // Header rows have SHORT parts (e.g., "Field | Value").
-        // Longer values like "Customer Alpha" mean this is a data row.
-        const isHeader = parts.length === 2 &&
-          parts.every(p =>
-            p.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(p)
-          );
-        if (!isHeader) {
+        // 3+ pipe parts = multi-column table row, NOT a field/value pair.
+        // Examples: "3 0 | 105745 Total | ($333.33) | $0.00"
+        //           "HDHP PPO Total | ($333.33) | $0.00"
+        if (parts.length >= 3) {
+          return pairs; // Will be handled as paragraph/table
+        }
+        // For exactly 2 parts, check for header/watermark/colon
+        const isHeader = parts.every(p =>
+          p.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(p)
+        );
+        const secondPartEndsWithColon = parts[1].trim().endsWith(":");
+        // Watermark value: single non-ASCII symbol like ▩, _MSK_, etc.
+        const isWatermarkValue = parts[1].length <= 3 && /^\p{So}+$/u.test(parts[1]);
+        if (!isHeader && !secondPartEndsWithColon && !isWatermarkValue) {
           pairs.push({ field: parts[0], value: parts[1] });
           return pairs;
         }
@@ -184,6 +187,58 @@ function extractFieldValuesFromText(text: string): Array<{ field: string; value:
  * Detect alternating key-value lines from RTF \cell extraction.
  * Converts "Field\nValue\nAccount\n1001" → ["Field | Value", "Account | 1001"]
  */
+/**
+ * Split concatenated field/value pairs that mammoth produces.
+ * Examples:
+ *   "Invoice Number260804584270" -> "Invoice Number | 260804584270"
+ *   "Bill Account NameBorough Of Ridgway" -> "Bill Account Name | Borough Of Ridgway"
+ *   "Total Numberof Installment" -> "Total Number | of Installment"
+ */
+function splitConcatenatedFieldValues(lines: string[]): string[] {
+  const result: string[] = [];
+  
+  // Pattern: Known field names followed by values
+  // These are common field names in business documents
+  const knownFields = [
+    "Client Number", "Client Name", "Invoice Number", "Bill Account Number",
+    "Bill Account Name", "Account Number", "Account Name", "Phone Number",
+    "Email Address", "Date", "Amount", "Total", "Subtotal", "Tax",
+    "Sort Description", "Page", "Paid Claims Month", "Claims Paid Thru",
+    "Bill Cycle", "Prepared", "Advance Deposit Total", "HDHP PPO Total",
+  ];
+  
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "") {
+      result.push(line);
+      continue;
+    }
+    
+    // Check if this line contains a known field name followed by a value
+    let matched = false;
+    for (const field of knownFields) {
+      if (trimmed.startsWith(field) && trimmed.length > field.length) {
+        let value = trimmed.substring(field.length).trim();
+        // Strip leading colon (e.g. "Sort Description: Product/Sub Group-8 Digit")
+        if (value.startsWith(":")) {
+          value = value.substring(1).trim();
+        }
+        if (value !== "") {
+          result.push(`${field} | ${value}`);
+          matched = true;
+          break;
+        }
+      }
+    }
+    
+    if (!matched) {
+      result.push(line);
+    }
+  }
+  
+  return result;
+}
+
 function normalizeCellLines(inputLines: string[]): string[] {
   const result: string[] = [];
   let i = 0;
@@ -386,13 +441,42 @@ function filterArtifactLines(lines: string[]): string[] {
     // Raw RTF control syntax that leaked through
     if (/^\\(rtf|ansi|deff|fonttbl|colortbl|stylesheet|info|pict|pard|par|tab|fs\d|b|i|ul|cf\d)+/.test(t)) return false;
     if (/^\{\\(rtf|fonttbl|colortbl|stylesheet|info|pict)/.test(t)) return false;
+    // Watermark/proof text patterns
+    if (/^Proof$/.test(t)) return false;
+    // Common watermark symbols
+    if (/^[_\\-]{3,}$/.test(t)) return false;
+    // Single non-ASCII symbols (watermark glyphs like \u25A1, \u25A3, etc.)
+    if (t.length <= 3 && /^\p{So}+$/u.test(t)) return false;
+    // Lines that are just whitespace + a few non-ASCII chars (proof watermarks)
+    if (t.length <= 5 && /^[\s\p{So}]+$/u.test(t)) return false;
     return true;
+  });
+}
+
+/**
+ * Strip watermark text from lines.
+ * Handles cases like:
+ *   "Proof | Borough Of Ridgway" → "Borough Of Ridgway"
+ *   "Bill Account Name | Proof | Borough Of Ridgway" → "Bill Account Name | Borough Of Ridgway"
+ */
+function stripWatermarkFromLines(lines: string[]): string[] {
+  return lines.map(line => {
+    let result = line;
+    // Strip "Proof | " prefix (watermark appears before real content)
+    result = result.replace(/^Proof\s*\|\s*/, "");
+    // Strip " | Proof" suffix (watermark appears after real content)
+    result = result.replace(/\s*\|\s*Proof$/, "");
+    // Strip single non-ASCII symbol from pipe values: "Field | ▩" → "Field"
+    result = result.replace(/\s*\|\s*\p{So}$/u, "");
+    // Strip single non-ASCII symbol from start: "华盛 | Field" → "Field"
+    result = result.replace(/^\p{So}\s*\|\s*/u, "");
+    return result;
   });
 }
 
 function textToCanonical(doc: ParsedDoc): ContentItem[] {
   const rawLines = doc.content?.type === "text" ? doc.content.lines : [];
-  const lines = normalizeCellLines(filterArtifactLines(rawLines));
+  const lines = normalizeCellLines(splitConcatenatedFieldValues(stripWatermarkFromLines(filterArtifactLines(rawLines))));
   const items: ContentItem[] = [];
 
   // First pass: detect pipe-delimited AND tab-delimited table blocks.
@@ -456,36 +540,73 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     const isHeader = block.rows.length >= 2 &&
       firstRow && firstRow.length === 2 &&
       firstRow.every(c => c.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(c));
-    const startRow = isHeader ? 1 : 0;
-
-    // Header becomes a paragraph (not data)
-    if (isHeader) {
-      items.push({
-        key: normalizeKey(firstRow.join(" ")),
-        label: firstRow.join(" | "),
-        value: firstRow.join(" | "),
-        kind: "paragraph",
-        sourceLocation: `Line ${block.start + 1}`,
-      });
-    }
-
-    // Data rows become field_value items
+    // Generic table headers (e.g., "Field | Value") are structural elements,
+    // not business content.  Only skip them when both cells match common
+    // generic column-name patterns — NOT when they are real field names
+    // like "Status | Active".
+    const GENERIC_HEADER_WORDS = new Set([
+      "field", "value", "name", "id", "label", "data", "key",
+      "column", "item", "description", "type", "category",
+      "number", "code", "reference", "info", "detail",
+    ]);
+    const isGenericHeader = isHeader &&
+      firstRow.every(c => GENERIC_HEADER_WORDS.has(c.toLowerCase()));
+    const startRow = isGenericHeader ? 1 : 0;    // Data rows become field_value items (only for 2-cell rows)
+    // Multi-column rows (3+ cells) are table data, not field/value pairs.
     for (let r = startRow; r < block.rows.length; r++) {
       const row = block.rows[r];
-      if (row.length >= 2) {
+      if (row.length >= 3) {
+        // Multi-column row: split into individual paragraph items
+        // so each value can match DOCX individual paragraphs.
+        // e.g., "3 0 | 105745 Total | ($333.33)" → 3 separate paragraphs
+        for (const cell of row) {
+          const cellVal = cell.trim();
+          if (cellVal !== "") {
+            items.push({
+              key: `para_${items.length}`,
+              label: cellVal,
+              value: cellVal,
+              kind: "paragraph",
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
+        }
+      } else if (row.length === 2) {
         const field = row[0].trim();
         const value = row[1].trim();
         if (field !== "" && value !== "") {
-          items.push({
-            key: normalizeKey(field),
-            label: field,
-            value,
-            kind: "field_value",
-            sourceLocation: `Line ${block.start + 1 + r}`,
-          });
+          // Check if this looks like a real field/value pair:
+          // Field must start with alpha, be short enough, and not be a date/number.
+          // Value must NOT end with ':' (that's a header label, not data).
+          const isFieldName = /^[A-Za-z]/.test(field) && !/^\d/.test(field) && field.length <= 40;
+          const isHeaderValue = value.endsWith(":");
+          if (isFieldName && !isHeaderValue) {
+            items.push({
+              key: normalizeKey(field),
+              label: field,
+              value,
+              kind: "field_value",
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          } else {
+            // Not a field/value pair — split into individual paragraphs
+            for (const cell of row) {
+              const cellVal = cell.trim();
+              if (cellVal !== "") {
+                items.push({
+                  key: `para_${items.length}`,
+                  label: cellVal,
+                  value: cellVal,
+                  kind: "paragraph",
+                  sourceLocation: `Line ${block.start + 1 + r}`,
+                });
+              }
+            }
+          }
         }
       }
     }
+
   }
 
   // Process remaining lines (not in pipe tables)
@@ -766,6 +887,90 @@ export function compareCanonical(
     }
   }
 
+  // Phase 1b: Match field_values against unmatched paragraphs by LABEL.
+  // Only matches when the values are ALSO compatible — prevents false matches
+  // like field_value("group", "Total") matching paragraph "Group".
+  const kvUnmatchedBaseline1b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const paraUnmatchedComparing1b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+
+  for (const { el: bEl, idx: bIdx } of kvUnmatchedBaseline1b) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bLabelNorm = normalizeText(bEl.label).toLowerCase().trim().replace(/:\s*$/, "");
+    const bValNorm = normalizeText(bEl.value).toLowerCase().trim();
+    if (bLabelNorm.length < 2) continue;
+    for (const { el: cEl, idx: cIdx } of paraUnmatchedComparing1b) {
+      if (!unmatchedComparing.has(cIdx)) continue;
+      const cNorm = normalizeText(cEl.value).toLowerCase().trim().replace(/:\s*$/, "");
+      if (bLabelNorm === cNorm) {
+        // Cross-type match: paragraph text equals field_value's label.
+        // The paragraph IS the label — mark as identical since the field
+        // exists in both formats. The value comparison is separate.
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Same in reverse: COMPARING field_values against BASELINE paragraphs by label
+  const kvUnmatchedComparing1b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const paraUnmatchedBaseline1b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+
+  for (const { el: cEl, idx: cIdx } of kvUnmatchedComparing1b) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cLabelNorm = normalizeText(cEl.label).toLowerCase().trim().replace(/:\s*$/, "");
+    const cValNorm = normalizeText(cEl.value).toLowerCase().trim();
+    if (cLabelNorm.length < 2) continue;
+    for (const { el: bEl, idx: bIdx } of paraUnmatchedBaseline1b) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      const bNorm = normalizeText(bEl.value).toLowerCase().trim().replace(/:\s*$/, "");
+      if (cLabelNorm === bNorm) {
+        // Cross-type match: paragraph text equals field_value's label.
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedComparing.delete(cIdx);
+        unmatchedBaseline.delete(bIdx);
+        break;
+      }
+    }
+  }
+
+  // Phase 1c: Consume orphaned value paragraphs after Phase 1b label matching.
+  // When Phase 1b matches field_value("customer", "Customer Alpha") against
+  // paragraph "Customer" by label, the value "Customer Alpha" may remain as
+  // an unmatched paragraph. Match it against the field_value's value.
+  const kvMatched1b = Array.from(matched)
+    .filter(m => m.baseline.kind === "field_value" && m.comparing.kind === "paragraph")
+    .concat(
+      matched.filter(m => m.baseline.kind === "paragraph" && m.comparing.kind === "field_value")
+    );
+  for (const m of kvMatched1b) {
+    const fvEl = m.baseline.kind === "field_value" ? m.baseline : m.comparing;
+    const paraEl = m.baseline.kind === "paragraph" ? m.baseline : m.comparing;
+    const fvValNorm = normalizeText(fvEl.value).toLowerCase().trim();
+    if (fvValNorm.length < 2) continue;
+    // Find an unmatched paragraph in the OTHER set with the same text
+    const isBaselineFV = m.baseline.kind === "field_value";
+    const otherSet = isBaselineFV ? unmatchedComparing : unmatchedBaseline;
+    for (const idx of otherSet) {
+      const item = isBaselineFV ? comparing.items[idx] : baseline.items[idx];
+      if (item.kind !== "paragraph" && item.kind !== "list_item") continue;
+      const itemNorm = normalizeText(item.value).toLowerCase().trim().replace(/:\s*$/, "");
+      if (itemNorm === fvValNorm) {
+        otherSet.delete(idx);
+        break;
+      }
+    }
+  }
+
   // Phase 2: Match remaining items by normalized text content.
   // Handles paragraphs, list_items, and any unmatched items.
   const remainingBaseline = Array.from(unmatchedBaseline)
@@ -802,7 +1007,11 @@ export function compareCanonical(
       // Check if the paragraph value contains the field value
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      if (bNorm.includes(cNorm) || cNorm.includes(bNorm)) {
+      // Require substring to be meaningful: ≥3 chars or ≥30% of shorter value
+      const shorterLen = Math.min(bNorm.length, cNorm.length);
+      const longerHasShorter = bNorm.includes(cNorm) && (cNorm.length >= 3 || cNorm.length >= shorterLen * 0.3);
+      const shorterHasLonger = cNorm.includes(bNorm) && (bNorm.length >= 3 || bNorm.length >= shorterLen * 0.3);
+      if (longerHasShorter || shorterHasLonger) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -826,7 +1035,10 @@ export function compareCanonical(
       if (usedComp.has(bIdx)) continue;
       const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
       const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
-      if (bNorm.includes(cNorm) || cNorm.includes(bNorm)) {
+      const shorterLen2 = Math.min(bNorm.length, cNorm.length);
+      const longerHasShorter2 = bNorm.includes(cNorm) && (cNorm.length >= 3 || cNorm.length >= shorterLen2 * 0.3);
+      const shorterHasLonger2 = cNorm.includes(bNorm) && (bNorm.length >= 3 || bNorm.length >= shorterLen2 * 0.3);
+      if (longerHasShorter2 || shorterHasLonger2) {
         matched.push({ baseline: bEl, comparing: cEl, identical: true });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
@@ -906,6 +1118,92 @@ export function compareCanonical(
       matched.push({ baseline: containedBaseline[0].el, comparing: cEl, identical });
       unmatchedComparing.delete(cIdx);
       for (const { idx: bIdx } of containedBaseline) {
+        unmatchedBaseline.delete(bIdx);
+      }
+    }
+  }
+
+  // Phase 5c: Space-separated word matching.
+  // When PDF produces "3 0" as one paragraph but DOCX has "3" and "0"
+  // as separate paragraphs, split the longer value by space and check
+  // if each word matches an individual comparing item.
+  const unmatchedBasePara5c = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }));
+  const unmatchedCompPara5c = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }));
+
+  for (const { el: bEl, idx: bIdx } of unmatchedBasePara5c) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bVal = bEl.value.trim();
+    const bWords = bVal.split(/\s+/).filter(w => w.length > 0);
+    if (bWords.length < 2) continue; // Need at least 2 words to split
+
+    const matchedWords: Array<{ el: ContentItem; idx: number }> = [];
+    for (const word of bWords) {
+      const wordNorm = normalizeText(word).toLowerCase();
+      if (wordNorm.length === 0) continue;
+      // Find a comparing item that matches this word
+      let found = false;
+      for (const { el: cEl, idx: cIdx } of unmatchedCompPara5c) {
+        if (!unmatchedComparing.has(cIdx)) continue;
+        const cNorm = normalizeText(cEl.value).toLowerCase();
+        if (cNorm === wordNorm) {
+          matchedWords.push({ el: cEl, idx: cIdx });
+          found = true;
+          break;
+        }
+      }
+    }
+    // All words matched → consume the baseline paragraph and all matched comparing items
+    if (matchedWords.length === bWords.length) {      matched.push({
+        baseline: bEl,
+        comparing: matchedWords[0].el,
+        // All words matched — same content, different representation
+        identical: normalizeText(bEl.value).toLowerCase() ===
+          matchedWords.map(m => normalizeText(m.el.value)).join(' ').toLowerCase(),
+      });
+      unmatchedBaseline.delete(bIdx);
+      for (const { idx: cIdx } of matchedWords) {
+        unmatchedComparing.delete(cIdx);
+      }
+    }
+  }
+
+  // Same in reverse: comparing paragraphs split by space match baseline items
+  const unmatchedBasePara5c2 = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }));
+  const unmatchedCompPara5c2 = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }));
+
+  for (const { el: cEl, idx: cIdx } of unmatchedCompPara5c2) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cVal = cEl.value.trim();
+    const cWords = cVal.split(/\s+/).filter(w => w.length > 0);
+    if (cWords.length < 2) continue;
+
+    const matchedWords: Array<{ el: ContentItem; idx: number }> = [];
+    for (const word of cWords) {
+      const wordNorm = normalizeText(word).toLowerCase();
+      if (wordNorm.length === 0) continue;
+      for (const { el: bEl, idx: bIdx } of unmatchedBasePara5c2) {
+        if (!unmatchedBaseline.has(bIdx)) continue;
+        const bNorm = normalizeText(bEl.value).toLowerCase();
+        if (bNorm === wordNorm) {
+          matchedWords.push({ el: bEl, idx: bIdx });
+          break;
+        }
+      }
+    }
+    if (matchedWords.length === cWords.length) {
+      matched.push({
+        baseline: matchedWords[0].el,
+        comparing: cEl,
+        // All words matched — same content, different representation
+        identical: normalizeText(cEl.value).toLowerCase() ===
+          matchedWords.map(m => normalizeText(m.el.value)).join(' ').toLowerCase(),
+      });
+      unmatchedComparing.delete(cIdx);
+      for (const { idx: bIdx } of matchedWords) {
         unmatchedBaseline.delete(bIdx);
       }
     }
@@ -997,6 +1295,61 @@ export function compareCanonical(
     }
   }
 
+  // Phase 5b: Match paragraphs against field_value labels (cross-type matching).
+  // When PDF has a standalone paragraph "Bill Account Name" (because the next
+  // line was filtered as watermark), but DOCX has field_value("bill account name",
+  // "Borough Of Ridgway"), match them by comparing the paragraph text against
+  // the field_value's label.
+  const unmatchedParaBaseline5b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+  const unmatchedKVComparing5b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+
+  for (const { el: bEl, idx: bIdx } of unmatchedParaBaseline5b) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bNorm = normalizeText(bEl.value).toLowerCase().trim();
+    if (bNorm.length < 2) continue;
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComparing5b) {
+      if (usedComp.has(cIdx)) continue;
+      const cLabelNorm = normalizeText(cEl.label).toLowerCase().trim();
+      // Match if the paragraph text equals the field_value's label
+      if (bNorm === cLabelNorm) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Same in reverse: comparing paragraphs against baseline field_value labels
+  const unmatchedParaComparing5b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+  const unmatchedKVBaseline5b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+
+  for (const { el: cEl, idx: cIdx } of unmatchedParaComparing5b) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cNorm = normalizeText(cEl.value).toLowerCase().trim();
+    if (cNorm.length < 2) continue;
+    for (const { el: bEl, idx: bIdx } of unmatchedKVBaseline5b) {
+      if (usedComp.has(bIdx)) continue;
+      const bLabelNorm = normalizeText(bEl.label).toLowerCase().trim();
+      if (cNorm === bLabelNorm) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedComparing.delete(cIdx);
+        unmatchedBaseline.delete(bIdx);
+        usedComp.add(bIdx);
+        break;
+      }
+    }
+  }
+
   // Phase 6b: Match consecutive paragraphs against field_value items.
   // When PDF produces "Claims Paid Thru" + "07/31/2026 (Bill Cycle 5 of 5)"
   // as two paragraphs, but RTF produces field_value("claims paid thru",
@@ -1072,43 +1425,38 @@ export function compareCanonical(
   const unmatchedBaseArr = Array.from(unmatchedBaseline).map(i => ({ el: baseline.items[i], idx: i }));
   const unmatchedCompArr = Array.from(unmatchedComparing).map(i => ({ el: comparing.items[i], idx: i }));
 
-  // For each unmatched baseline item, find ALL unmatched comparing items
-  // whose tokens are a subset.  If the union of their tokens covers ≥70%
-  // of the baseline tokens, match them.
+  // For each unmatched baseline item, find comparing items with high token
+  // overlap.  When two paragraphs differ by one word (e.g. "Customer Name
+  // Balaji Rajasekar" vs "Customer Name Balaji Kumar"), they should still
+  // be matched and reported as a value mismatch — not as missing/added.
+  // Strategy: compute overlap between token sets.  Match when the
+  // intersection covers >=60% of the SHORTER token set and both have >=2 tokens.
   for (const { el: bEl, idx: bIdx } of unmatchedBaseArr) {
     if (!unmatchedBaseline.has(bIdx)) continue;
     const bTokens = tokenizeForMatch(bEl.value);
-    if (bTokens.size < 2) continue; // Need at least 2 tokens to compare
+    if (bTokens.size < 2) continue;
 
-    const matchingComp: Array<{ el: ContentItem; idx: number }> = [];
-    const compTokenUnion = new Set<string>();
+    let bestMatch: { el: ContentItem; idx: number; overlap: number } | null = null;
     for (const { el: cEl, idx: cIdx } of unmatchedCompArr) {
       if (!unmatchedComparing.has(cIdx)) continue;
       const cTokens = tokenizeForMatch(cEl.value);
-      if (cTokens.size === 0) continue;
-      // Check if all comparing tokens are in baseline tokens
-      const isSubset = Array.from(cTokens).every(t => bTokens.has(t));
-      if (isSubset) {
-        matchingComp.push({ el: cEl, idx: cIdx });
-        for (const t of cTokens) compTokenUnion.add(t);
+      if (cTokens.size < 2) continue;
+      const shared = Array.from(cTokens).filter(t => bTokens.has(t)).length;
+      const shorterLen = Math.min(bTokens.size, cTokens.size);
+      const coverage = shared / shorterLen;
+      if (coverage >= 0.6 && (!bestMatch || shared > bestMatch.overlap)) {
+        bestMatch = { el: cEl, idx: cIdx, overlap: shared };
       }
     }
-    if (matchingComp.length >= 1) {
-      // Check coverage: comparing tokens cover at least 70% of baseline tokens
-      const overlap = Array.from(bTokens).filter(t => compTokenUnion.has(t)).length;
-      const coverage = overlap / bTokens.size;
-      if (coverage >= 0.7) {
-        matched.push({
-          baseline: bEl,
-          comparing: matchingComp[0].el,
-          identical: normalizeText(bEl.value).toLowerCase() ===
-            matchingComp.map(c => normalizeText(c.el.value)).join(' ').toLowerCase(),
-        });
-        unmatchedBaseline.delete(bIdx);
-        for (const { idx: cIdx } of matchingComp) {
-          unmatchedComparing.delete(cIdx);
-        }
-      }
+    if (bestMatch) {
+      matched.push({
+        baseline: bEl,
+        comparing: bestMatch.el,
+        identical: normalizeText(bEl.value).toLowerCase() ===
+          normalizeText(bestMatch.el.value).toLowerCase(),
+      });
+      unmatchedBaseline.delete(bIdx);
+      unmatchedComparing.delete(bestMatch.idx);
     }
   }
 
@@ -1121,33 +1469,27 @@ export function compareCanonical(
     const cTokens = tokenizeForMatch(cEl.value);
     if (cTokens.size < 2) continue;
 
-    const matchingBase: Array<{ el: ContentItem; idx: number }> = [];
-    const baseTokenUnion = new Set<string>();
+    let bestMatch: { el: ContentItem; idx: number; overlap: number } | null = null;
     for (const { el: bEl, idx: bIdx } of unmatchedBaseArr2) {
       if (!unmatchedBaseline.has(bIdx)) continue;
       const bTokens = tokenizeForMatch(bEl.value);
-      if (bTokens.size === 0) continue;
-      const isSubset = Array.from(bTokens).every(t => cTokens.has(t));
-      if (isSubset) {
-        matchingBase.push({ el: bEl, idx: bIdx });
-        for (const t of bTokens) baseTokenUnion.add(t);
+      if (bTokens.size < 2) continue;
+      const shared = Array.from(bTokens).filter(t => cTokens.has(t)).length;
+      const shorterLen = Math.min(bTokens.size, cTokens.size);
+      const coverage = shared / shorterLen;
+      if (coverage >= 0.6 && (!bestMatch || shared > bestMatch.overlap)) {
+        bestMatch = { el: bEl, idx: bIdx, overlap: shared };
       }
     }
-    if (matchingBase.length >= 1) {
-      const overlap = Array.from(cTokens).filter(t => baseTokenUnion.has(t)).length;
-      const coverage = overlap / cTokens.size;
-      if (coverage >= 0.7) {
-        matched.push({
-          baseline: matchingBase[0].el,
-          comparing: cEl,
-          identical: normalizeText(cEl.value).toLowerCase() ===
-            matchingBase.map(b => normalizeText(b.el.value)).join(' ').toLowerCase(),
-        });
-        unmatchedComparing.delete(cIdx);
-        for (const { idx: bIdx } of matchingBase) {
-          unmatchedBaseline.delete(bIdx);
-        }
-      }
+    if (bestMatch) {
+      matched.push({
+        baseline: bestMatch.el,
+        comparing: cEl,
+        identical: normalizeText(cEl.value).toLowerCase() ===
+          normalizeText(bestMatch.el.value).toLowerCase(),
+      });
+      unmatchedComparing.delete(cIdx);
+      unmatchedBaseline.delete(bestMatch.idx);
     }
   }
 

@@ -5,6 +5,7 @@ import {
   type ValidatorStage,
 } from "@/context/ValidatorContext";
 import { DiffExplorer } from "@/components/validator/DiffExplorer";
+import { DebugPanel } from "@/components/validator/DebugPanel";
 import { GroupReview } from "@/components/validator/GroupReview";
 import { InputPicker } from "@/components/validator/InputPicker";
 import { PrivacyPanel } from "@/components/validator/PrivacyPanel";
@@ -210,7 +211,12 @@ function DashboardInner() {
               <>
                 {stage === "input" && <InputPicker />}
                 {stage === "groups" && <GroupReview />}
-                {stage === "diffs" && <DiffExplorer />}
+                {stage === "diffs" && (
+                  <div className="space-y-4">
+                    <DiffExplorer />
+                    <DebugPanel />
+                  </div>
+                )}
               </>
             )}
             {view === "rules" && <RulesPanel />}
