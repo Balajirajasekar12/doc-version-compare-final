@@ -52,20 +52,72 @@ export async function extractDocxText(arrayBuffer: ArrayBuffer): Promise<string>
 }
 
 /**
+ * Strip all HTML tags from a fragment and decode entities.
+ */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, code: string) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_: string, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+    .trim();
+}
+
+/**
+ * Extract rows from a <table> HTML fragment and convert to pipe-delimited lines.
+ * This preserves cell boundaries so the canonicalizer can recognize table structure.
+ */
+function extractTableRows(tableHtml: string): string[] {
+  const rows: string[] = [];
+  // Match each <tr>...</tr>
+  const trRegex = /<tr\b[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
+  while ((trMatch = trRegex.exec(tableHtml)) !== null) {
+    const rowContent = trMatch[1];
+    const cells: string[] = [];
+    // Match each <td> or <th> cell
+    const cellRegex = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+    let cellMatch;
+    while ((cellMatch = cellRegex.exec(rowContent)) !== null) {
+      const cellText = stripHtml(cellMatch[1]);
+      if (cellText !== "") {
+        cells.push(cellText);
+      }
+    }
+    if (cells.length > 0) {
+      rows.push(cells.join(" | "));
+    }
+  }
+  return rows;
+}
+
+/**
  * Convert HTML to structured text, preserving line breaks at block elements.
- * This handles the case where mammoth produces HTML like:
- * <p>Paid Claims Month<b>August 2026</b></p>
- * and we need to extract text with proper line breaks.
+ * Tables are converted to pipe-delimited rows so the canonicalizer can
+ * recognize row/cell structure instead of flattening cells into paragraphs.
  */
 function htmlToText(html: string): string[] {
   const lines: string[] = [];
 
-  // Split by block-level elements and extract text
-  // Block elements: p, div, h1-h6, li, tr, table, etc.
+  // Step 1: Extract tables as pipe-delimited rows BEFORE any processing.
+  // This preserves the row/cell structure that would otherwise be lost
+  // when <td> content gets flattened by the generic HTML-to-text conversion.
+  let processed = html.replace(
+    /<table\b[^>]*>([\s\S]*?)<\/table>/gi,
+    (_match, tableContent: string) => {
+      const rows = extractTableRows(tableContent);
+      return "\n" + rows.join("\n") + "\n";
+    },
+  );
+
+  // Step 2: Split by block-level elements and extract text
   const blockRegex = /<(p|div|h[1-6]|li|tr|br|hr)\b[^>]*>/gi;
-  
-  // Replace block elements with newlines
-  let processed = html
+  processed = processed
     // Add newlines before block elements
     .replace(blockRegex, "\n")
     // Add newlines after closing block elements

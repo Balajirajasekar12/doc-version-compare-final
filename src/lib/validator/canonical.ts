@@ -199,12 +199,12 @@ function splitConcatenatedFieldValues(lines: string[]): string[] {
   
   // Pattern: Known field names followed by values
   // These are common field names in business documents
+  // Generic business document field names — NO document-specific entries.
   const knownFields = [
     "Client Number", "Client Name", "Invoice Number", "Bill Account Number",
     "Bill Account Name", "Account Number", "Account Name", "Phone Number",
     "Email Address", "Date", "Amount", "Total", "Subtotal", "Tax",
     "Sort Description", "Page", "Paid Claims Month", "Claims Paid Thru",
-    "Bill Cycle", "Prepared", "Advance Deposit Total", "HDHP PPO Total",
   ];
   
   for (const line of lines) {
@@ -214,7 +214,10 @@ function splitConcatenatedFieldValues(lines: string[]): string[] {
       continue;
     }
     
-    // Check if this line contains a known field name followed by a value
+    // Check if this line contains a known field name followed by a value.
+    // CRITICAL: Only split when the value looks like a real value (short,
+    // numeric, date-like, or colon-separated), NOT when it's a multi-word
+    // table header continuation like "Total Number of Installment".
     let matched = false;
     for (const field of knownFields) {
       if (trimmed.startsWith(field) && trimmed.length > field.length) {
@@ -224,9 +227,24 @@ function splitConcatenatedFieldValues(lines: string[]): string[] {
           value = value.substring(1).trim();
         }
         if (value !== "") {
-          result.push(`${field} | ${value}`);
-          matched = true;
-          break;
+          // Only split if the value looks like a real value, not a header:
+          // 1. Short (≤15 chars): covers dates, IDs, currency, short text
+          // 2. Numeric: amounts, counts, IDs
+          // 3. Date-like: contains / or - with digits
+          // 4. Currency-like: starts with $ or (
+          // 5. Single word that is NOT alpha-only (e.g. "016543", "($333.33)")
+          // Multi-word alpha phrases like "Number of Installment" are header
+          // continuations, not values.
+          const isRealValue = value.length <= 15 ||
+            /^\d/.test(value) ||
+            /\d[\/\-]\d/.test(value) ||
+            /^[\$\(]/.test(value) ||
+            value.split(/\s+/).length === 1;
+          if (isRealValue) {
+            result.push(`${field} | ${value}`);
+            matched = true;
+            break;
+          }
         }
       }
     }
@@ -341,26 +359,42 @@ function normalizeCellLines(inputLines: string[]): string[] {
         //    (handles standalone fields like "Claims Paid Thru" → "07/31/2026...")
         const isStandalonePair = fallbackCount === 0 && fbIdx <= i + 2;
         if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
-          // Emit without header — first pair is data
-          result.push(`${trimmed} | ${nextTrimmed}`);
-          fbIdx = i + 2;
-          while (fbIdx + 1 < inputLines.length) {
-            const k = inputLines[fbIdx].trim();
-            const v = inputLines[fbIdx + 1].trim();
-            if (k === "" || v === "") break;
-            if (!isKeyLike(k)) break;
-            if (/\S\s{2,}\S/.test(v) || v.includes("|") || v.includes("\t")) break;
-            result.push(`${k} | ${v}`);
-            fbIdx += 2;
+          // Check that at least one key has 2+ words (business field names
+          // are multi-word: "Client Number", "Bill Account Name", etc.)
+          // Single-word keys like "Total", "Group" are table header cells,
+          // not field names.
+          const allSingleWord = [trimmed, ...inputLines.slice(i + 2, fbIdx).filter((_, idx) => idx % 2 === 0)].every(
+            k => k.trim().split(/\s+/).length === 1,
+          );
+          if (!allSingleWord) {
+            // Emit without header — first pair is data
+            result.push(`${trimmed} | ${nextTrimmed}`);
+            fbIdx = i + 2;
+            while (fbIdx + 1 < inputLines.length) {
+              const k = inputLines[fbIdx].trim();
+              const v = inputLines[fbIdx + 1].trim();
+              if (k === "" || v === "") break;
+              if (!isKeyLike(k)) break;
+              if (/\S\s{2,}\S/.test(v) || v.includes("|") || v.includes("\t")) break;
+              result.push(`${k} | ${v}`);
+              fbIdx += 2;
+            }
+            i = fbIdx;
+            continue;
           }
-          i = fbIdx;
-          continue;
         } else if (isStandalonePair && trimmed.length <= 20 && nextTrimmed.length <= 40 && !/  /.test(nextTrimmed) && !/\t/.test(nextTrimmed)) {
           // Single standalone pair: short key + short non-alpha value
           // Exclude values with internal spaces/tabs (already table data)
-          result.push(`${trimmed} | ${nextTrimmed}`);
-          i += 2;
-          continue;
+          // REQUIRE multi-word keys: single words like "Total", "Group" are
+          // table header cells, not business field names.  Business fields are
+          // multi-word: "Client Number", "Bill Account Name", etc.
+          const keyWordCount = trimmed.split(/\s+/).length;
+          const valueHasSpaces = /\s/.test(nextTrimmed);
+          if (keyWordCount >= 2 || !valueHasSpaces) {
+            result.push(`${trimmed} | ${nextTrimmed}`);
+            i += 2;
+            continue;
+          }
         }
       }
     }
@@ -474,9 +508,70 @@ function stripWatermarkFromLines(lines: string[]): string[] {
   });
 }
 
+/**
+ * Join consecutive lines that form a semantic unit.
+ * Example: "07/31/2026" + "(Bill Cycle 5 of 5)" → "07/31/2026 (Bill Cycle 5 of 5)"
+ *
+ * This is GENERIC: a date-like value (contains digits and / or -) followed by
+ * a parenthetical description is combined.  This does NOT join arbitrary text
+ * with parentheticals (e.g., "105745 Total" + "($333.33)" stays separate).
+ */
+function joinConsecutiveFragments(lines: string[]): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const current = lines[i].trim();
+    const next = i + 1 < lines.length ? lines[i + 1].trim() : "";
+    // Only join when the first line looks like a date (contains / or - with digits)
+    // and the second line is a parenthetical.
+    // This is a generic structural rule for business documents.
+    // Require a date-like prefix: digits followed by / or - followed by digits.
+    // This excludes non-date strings like "Product/Sub Group-8 Digit"
+    // or account numbers like "105745-44".
+    const isDateLike = /^\d+[\/.\-]\d+/.test(current) && current.length <= 30;
+    const isParenthetical = next.length > 0 && next.startsWith("(") && next.endsWith(")") &&
+      !next.includes("|") && !next.includes("\t");
+    if (isDateLike && isParenthetical) {
+      result.push(`${current} ${next}`);
+      i++; // skip next line
+    } else {
+      result.push(lines[i]);
+    }
+  }
+  return result;
+}
+
+/**
+ * Split a cell value that contains multiple space-separated short numeric values.
+ * Example: "3 0" → ["3", "0"]
+ * Does NOT split values like "105745 Total" (has alpha text) or long values.
+ */
+function splitMultiValueCell(cell: string): string[] {
+  const trimmed = cell.trim();
+  const parts = trimmed.split(/\s+/);
+  // Split only when ALL parts are short (≤6 chars) numeric values
+  // and there are 2-3 parts. This handles "3 0" but not "105745 Total".
+  // Also exclude date-like patterns: "2026 08" (year-month) should stay whole.
+  // Date-like: 4-digit year followed by 1-2 digit month/day.
+  const isDateLike = parts.length === 2 &&
+    /^\d{4}$/.test(parts[0]) && /^\d{1,2}$/.test(parts[1]);
+  if (parts.length >= 2 && parts.length <= 3 &&
+      parts.every(p => /^\d{1,6}$/.test(p)) && !isDateLike) {
+    return parts;
+  }
+  return [trimmed];
+}
+
 function textToCanonical(doc: ParsedDoc): ContentItem[] {
   const rawLines = doc.content?.type === "text" ? doc.content.lines : [];
-  const lines = normalizeCellLines(splitConcatenatedFieldValues(stripWatermarkFromLines(filterArtifactLines(rawLines))));
+  const lines = normalizeCellLines(
+    joinConsecutiveFragments(
+      splitConcatenatedFieldValues(
+        stripWatermarkFromLines(
+          filterArtifactLines(rawLines)
+        )
+      )
+    )
+  );
   const items: ContentItem[] = [];
 
   // First pass: detect pipe-delimited AND tab-delimited table blocks.
@@ -551,7 +646,10 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     ]);
     const isGenericHeader = isHeader &&
       firstRow.every(c => GENERIC_HEADER_WORDS.has(c.toLowerCase()));
-    const startRow = isGenericHeader ? 1 : 0;    // Data rows become field_value items (only for 2-cell rows)
+
+    const startRow = isGenericHeader ? 1 : 0;
+
+    // Data rows become field_value items (only for 2-cell rows)
     // Multi-column rows (3+ cells) are table data, not field/value pairs.
     for (let r = startRow; r < block.rows.length; r++) {
       const row = block.rows[r];
@@ -562,13 +660,17 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
         for (const cell of row) {
           const cellVal = cell.trim();
           if (cellVal !== "") {
-            items.push({
-              key: `para_${items.length}`,
-              label: cellVal,
-              value: cellVal,
-              kind: "paragraph",
-              sourceLocation: `Line ${block.start + 1 + r}`,
-            });
+            // Split multi-value cells: "3 0" → ["3", "0"]
+            const subCells = splitMultiValueCell(cellVal);
+            for (const subCell of subCells) {
+              items.push({
+                key: `para_${items.length}`,
+                label: subCell,
+                value: subCell,
+                kind: "paragraph",
+                sourceLocation: `Line ${block.start + 1 + r}`,
+              });
+            }
           }
         }
       } else if (row.length === 2) {
@@ -578,7 +680,9 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
           // Check if this looks like a real field/value pair:
           // Field must start with alpha, be short enough, and not be a date/number.
           // Value must NOT end with ':' (that's a header label, not data).
-          const isFieldName = /^[A-Za-z]/.test(field) && !/^\d/.test(field) && field.length <= 40;
+          // Field names must be 2+ chars, start with alpha, max 40 chars.
+          // Single letters ("A", "B") are likely table cell values, not field names.
+          const isFieldName = /^[A-Za-z]/.test(field) && !/^\d/.test(field) && field.length >= 2 && field.length <= 40;
           const isHeaderValue = value.endsWith(":");
           if (isFieldName && !isHeaderValue) {
             items.push({
@@ -667,7 +771,37 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     });
   }
 
-  return items;
+  // ── Post-processing: join consecutive paragraphs ─────────────────────
+  // When pipe processing splits "07/31/2026 | (Bill Cycle 5 of 5)" into
+  // two cells, they become two separate paragraphs.  Join them back:
+  // "07/31/2026" + "(Bill Cycle 5 of 5)" → "07/31/2026 (Bill Cycle 5 of 5)"
+  // This is generic: any date-like paragraph followed by a parenthetical.
+  const joinedItems: ContentItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const current = items[i];
+    const next = i + 1 < items.length ? items[i + 1] : null;
+    if (current.kind === "paragraph" && next && next.kind === "paragraph") {
+      const curVal = current.value.trim();
+      const nextVal = next.value.trim();
+      // Require digits followed by / or - then more digits (date-like prefix)
+      const isDateLike = /^\d+[\/.\-]\d+/.test(curVal) && curVal.length <= 30;
+      const isParenthetical = nextVal.startsWith("(") && nextVal.endsWith(")") && nextVal.length > 2;
+      if (isDateLike && isParenthetical) {
+        joinedItems.push({
+          key: `para_${joinedItems.length}`,
+          label: `${curVal} ${nextVal}`,
+          value: `${curVal} ${nextVal}`,
+          kind: "paragraph",
+          sourceLocation: current.sourceLocation,
+        });
+        i++; // skip next item
+        continue;
+      }
+    }
+    joinedItems.push(current);
+  }
+
+  return joinedItems;
 }
 
 /**
