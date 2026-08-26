@@ -201,6 +201,8 @@ export async function runOptimization(
     anchors: [],
   };
   const perSheetDrawingAnalysis: SheetDrawingAnalysis[] = [];
+  // Collect cell mappings from row insertions (for validator).
+  const cellMappings: Map<string, Map<string, string>>[] = [];
   await stage("generating", "Generating optimized workbook…", 92, onProgress, async () => {
     loaded.zip.file("xl/styles.xml", loaded.styleLib.serialize());
     for (const name of touchedSheets) {
@@ -218,6 +220,14 @@ export async function runOptimization(
       if (ps.hasDrawing) {
         debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
+      // Collect cell mapping for this sheet.
+      const sheetMapping = new Map<string, string>();
+      if (stats.cellMapping) {
+        for (const [oldRef, newRef] of stats.cellMapping) {
+          sheetMapping.set(oldRef, newRef);
+        }
+      }
+      cellMappings.push(new Map([[info.name, sheetMapping]]));
       // Collect per-sheet drawing analysis.
       perSheetDrawingAnalysis.push({
         sheetName: info.name,
@@ -265,7 +275,7 @@ export async function runOptimization(
   // — a bad file is never delivered.
   const freshZip = await loadZip(buffer);
   const afterSnapshot = await extractSnapshot(freshZip, loaded.wb.sheets);
-  const validation = validateOutput(session.beforeSnapshot, afterSnapshot);
+  const validation = validateOutput(session.beforeSnapshot, afterSnapshot, cellMappings);
 
   // Content preservation check: compare cell counts per sheet
   for (let i = 0; i < Math.max(session.beforeSnapshot.sheets.length, afterSnapshot.sheets.length); i++) {

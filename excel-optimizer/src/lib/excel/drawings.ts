@@ -231,6 +231,8 @@ export interface ImageOptimizationStats {
   imagesGrouped: number;
   /** Detailed per-anchor info. */
   anchors: AnchorInfo[];
+  /** Cell reference mapping due to row insertion (old ref -> new ref). */
+  cellMapping?: Map<string, string>;
 }
 
 /**
@@ -272,6 +274,71 @@ function normalizeRelTarget(dir: string, target: string): string {
     else stack.push(p);
   }
   return stack.join("/");
+}
+
+/**
+ * Inserts empty rows in the worksheet XML to push content down.
+ * This creates space for images between content blocks.
+ *
+ * For each row element with row number >= insertAtRow, the row number
+ * is incremented by rowsToInsert. Cell references are also updated.
+ */
+function insertRowsInWorksheet(
+  worksheetXml: string,
+  insertAtRow: number,
+  rowsToInsert: number,
+): { xml: string; cellMapping: Map<string, string> } {
+  if (rowsToInsert <= 0) return { xml: worksheetXml, cellMapping: new Map() };
+
+  const cellMapping = new Map<string, string>(); // old ref -> new ref
+  let result = worksheetXml;
+
+  // Update row numbers: <row r="N"> where N >= insertAtRow → N + rowsToInsert
+  // Process from bottom to top to avoid index invalidation.
+  const rowRegex = /<row\s[^>]*\br="(\d+)"/g;
+  const rowMatches: Array<{ start: number; end: number; rowNum: number }> = [];
+  let m;
+  while ((m = rowRegex.exec(result)) !== null) {
+    const rowNum = parseInt(m[1]);
+    if (rowNum >= insertAtRow) {
+      rowMatches.push({ start: m.index, end: m.index + m[0].length, rowNum });
+    }
+  }
+  // Process bottom to top.
+  for (let i = rowMatches.length - 1; i >= 0; i--) {
+    const match = rowMatches[i];
+    const newRowNum = match.rowNum + rowsToInsert;
+    const oldTag = `r="${match.rowNum}"`;
+    const newTag = `r="${newRowNum}"`;
+    const originalSegment = result.substring(match.start, match.end);
+    result = result.substring(0, match.start) +
+      originalSegment.replace(oldTag, newTag) +
+      result.substring(match.end);
+  }
+
+  // Update cell references: <c r="A123"> where row >= insertAtRow
+  const cellRegex = /<c\s[^>]*\br="([A-Z]+)(\d+)"/g;
+  const cellMatches: Array<{ start: number; end: number; col: string; rowNum: number }> = [];
+  while ((m = cellRegex.exec(result)) !== null) {
+    const rowNum = parseInt(m[2]);
+    if (rowNum >= insertAtRow) {
+      cellMatches.push({ start: m.index, end: m.index + m[0].length, col: m[1], rowNum });
+    }
+  }
+  for (let i = cellMatches.length - 1; i >= 0; i--) {
+    const match = cellMatches[i];
+    const newRowNum = match.rowNum + rowsToInsert;
+    const oldRef = `${match.col}${match.rowNum}`;
+    const newRef = `${match.col}${newRowNum}`;
+    cellMapping.set(oldRef, newRef);
+    const originalSegment = result.substring(match.start, match.end);
+    result = result.substring(0, match.start) +
+      originalSegment.replace(oldRef, newRef) +
+      result.substring(match.end);
+  }
+
+  debugLog.log("DRAWING", `insertRowsInWorksheet: inserted ${rowsToInsert} rows at row ${insertAtRow}`);
+  return { xml: result, cellMapping };
 }
 
 /**
@@ -508,10 +575,36 @@ export async function fixDrawingOverlaps(
   const contentBoundaryY = gapInfo.startY;
   stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
 
-  // NOTE: We do NOT insert rows into worksheet XML because that shifts
-  // cell positions and causes the validator to report "Value lost".
-  // Instead, images are placed at row positions below all content.
-  // Excel displays images at any row position without requiring explicit row elements.
+  // Calculate how many rows to insert if gap is too small for all images.
+  // Each image needs its height in rows + spacing.
+  const SPACING_ROWS = 2; // spacing between images in rows
+  let totalRowsNeeded = 0;
+  for (const r of rects) {
+    // Convert image height (EMU) to approximate rows.
+    const imageHeightRows = Math.ceil(r.h / (15 * 12700)); // default 15pt row height
+    totalRowsNeeded += imageHeightRows + SPACING_ROWS;
+  }
+  const gapRowsAvailable = gapInfo.gapRows;
+  const rowsToInsert = Math.max(0, totalRowsNeeded - gapRowsAvailable);
+
+  // Cell mapping: tracks how cell references shift due to row insertion.
+  let cellMapping = new Map<string, string>();
+
+  // Only insert rows when there IS a gap between content blocks.
+  // If no gap exists (content is contiguous), images go after the last content row.
+  if (rowsToInsert > 0 && gapInfo.gapRows > 0) {
+    debugLog.log("DRAWING", `  gap too small: need ${totalRowsNeeded} rows, have ${gapRowsAvailable}, inserting ${rowsToInsert}`);
+    // Insert rows in the worksheet XML.
+    const sheetXml = await readEntryText(zip, sheetFile);
+    if (sheetXml && typeof sheetXml === "string") {
+      const { xml: modifiedSheetXml, cellMapping: mapping } = insertRowsInWorksheet(sheetXml, gapInfo.gapStartRow, rowsToInsert);
+      if (modifiedSheetXml !== sheetXml) {
+        zip.file(sheetFile, modifiedSheetXml);
+        cellMapping = mapping;
+        debugLog.log("DRAWING", `  Inserted ${rowsToInsert} rows at row ${gapInfo.gapStartRow} in ${sheetFile}`);
+      }
+    }
+  }
 
   // Mark which anchors overlap content.
   for (let i = 0; i < rects.length; i++) {
@@ -647,6 +740,9 @@ export async function fixDrawingOverlaps(
       debugLog.log("DRAWING", `  VML: ${vmlMoved} shapes moved below content`);
     }
   }
+
+  // Attach cell mapping to stats so the validator can adjust cell references.
+  stats.cellMapping = cellMapping;
 
   return stats;
 }

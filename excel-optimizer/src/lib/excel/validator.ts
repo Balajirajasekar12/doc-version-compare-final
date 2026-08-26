@@ -302,7 +302,11 @@ function checkStyles(root: XmlEl, violations: string[]): void {
   }
 }
 
-export function validateOutput(before: WorkbookSnapshot, after: WorkbookSnapshot): ValidationResult {
+export function validateOutput(
+  before: WorkbookSnapshot,
+  after: WorkbookSnapshot,
+  cellMappings?: Map<string, Map<string, string>>[],
+): ValidationResult {
   const diffs: string[] = [];
 
   // Zip part list (skipped for legacy snapshots that don't carry one).
@@ -341,15 +345,48 @@ export function validateOutput(before: WorkbookSnapshot, after: WorkbookSnapshot
     if (a.state !== b.state) diffs.push(`Visibility of "${b.name}" changed (${b.state} → ${a.state})`);
     if (a.cellCount !== b.cellCount) diffs.push(`Cell count changed on "${b.name}"`);
 
+    // Get cell mapping for this sheet (if rows were inserted).
+    const sheetMapping = cellMappings?.[i]?.get(b.name) ?? new Map<string, string>();
+    // Create reverse mapping: new ref -> old ref (for looking up after values).
+    const reverseMapping = new Map<string, string>();
+    for (const [oldRef, newRef] of sheetMapping) {
+      reverseMapping.set(newRef, oldRef);
+    }
+
+    // Helper to find the after reference for a before reference.
+    const findAfterRef = (beforeRef: string): string => {
+      // If this ref was remapped, use the new ref.
+      const mapped = sheetMapping.get(beforeRef);
+      if (mapped) return mapped;
+      // If this ref is in the after values, use it directly.
+      if (a.formulas[beforeRef] !== undefined || a.values[beforeRef] !== undefined) return beforeRef;
+      // Check if any mapped ref points to this ref (reverse lookup).
+      const reverseMapped = reverseMapping.get(beforeRef);
+      if (reverseMapped) return beforeRef; // This ref was created by the mapping.
+      return beforeRef; // Default: use the original ref.
+    };
+
     // Formulas. Illegal XML characters are compared in their escaped form
     // (Excel decodes `_xHHHH_` back to the original character on load).
     const bf = Object.keys(b.formulas);
     const af = Object.keys(a.formulas);
-    if (bf.length !== af.length) diffs.push(`Formula count changed on "${b.name}" (${bf.length} → ${af.length})`);
+    if (bf.length !== af.length && sheetMapping.size === 0) {
+      diffs.push(`Formula count changed on "${b.name}" (${bf.length} → ${af.length})`);
+    }
     for (const ref of bf) {
-      const av = a.formulas[ref];
+      const afterRef = findAfterRef(ref);
+      const av = a.formulas[afterRef];
       if (av === undefined) {
-        diffs.push(`Formula lost at "${b.name}"!${ref}`);
+        // Check if the formula was simply moved (not lost).
+        const mappedRef = sheetMapping.get(ref);
+        if (mappedRef && a.formulas[mappedRef] !== undefined) {
+          // Formula was moved, not lost.
+          if (normFormula(a.formulas[mappedRef]) !== normFormula(escapeIllegalXmlChars(b.formulas[ref]))) {
+            diffs.push(`Formula changed at "${b.name}"!${ref} (moved to ${mappedRef})`);
+          }
+        } else {
+          diffs.push(`Formula lost at "${b.name}"!${ref}`);
+        }
       } else if (normFormula(av) !== normFormula(escapeIllegalXmlChars(b.formulas[ref]))) {
         diffs.push(`Formula changed at "${b.name}"!${ref}`);
       }
@@ -359,9 +396,23 @@ export function validateOutput(before: WorkbookSnapshot, after: WorkbookSnapshot
     // normalization (titles/subtitles/table headers) — recognized by the
     // after-value being exactly the deterministic title-case of the before.
     for (const [ref, val] of Object.entries(b.values)) {
-      const av = a.values[ref];
+      const afterRef = findAfterRef(ref);
+      const av = a.values[afterRef];
       if (av === undefined) {
-        diffs.push(`Value lost at "${b.name}"!${ref}`);
+        // Check if the value was simply moved (not lost).
+        const mappedRef = sheetMapping.get(ref);
+        if (mappedRef && a.values[mappedRef] !== undefined) {
+          // Value was moved, not lost.
+          if (
+            !valuesEqual(escapeIllegalXmlChars(val), a.values[mappedRef]) &&
+            !isTitleCaseChange(escapeIllegalXmlChars(val), a.values[mappedRef]) &&
+            !isTypoCorrectionChange(escapeIllegalXmlChars(val), a.values[mappedRef])
+          ) {
+            diffs.push(`Value changed at "${b.name}"!${ref} (moved to ${mappedRef})`);
+          }
+        } else {
+          diffs.push(`Value lost at "${b.name}"!${ref}`);
+        }
       } else if (
         !valuesEqual(escapeIllegalXmlChars(val), av) &&
         !isTitleCaseChange(escapeIllegalXmlChars(val), av) &&
