@@ -42,11 +42,24 @@ import type {
   TestPriority,
   TcgGenerationSummary,
   BusinessFlow,
+  MissingInformation,
+  SourceConflict,
+  TechnicalEntity,
 } from "../tcg/types";
 import { parseDocument } from "../tcg/parsers";
-import { extractKnowledge, buildSources } from "../tcg/analyzer";
+import { analyzeAll, buildSources } from "../tcg/analyzer";
 import { generateTestCases } from "../tcg/generator";
 import { exportToXlsx, exportToPdf, exportToCsv } from "../tcg/exporter";
+import {
+  copyPromptToClipboard,
+  parseSidekickResponse,
+  mergeAiEnhancedCases,
+  callSidekickDirectApi,
+  isDirectApiAvailable,
+  setSidekickApiConfig,
+  getSidekickApiConfig,
+  type SidekickApiConfig,
+} from "../tcg/genai-provider";
 
 // ============================================================
 // Helpers
@@ -61,6 +74,7 @@ const CATEGORY_LABELS: Record<DocumentCategory, string> = {
   design: "Design",
   database: "Database / SQL",
   architecture_image: "Architecture / Diagram",
+  source_code: "Source Code",
   other: "Other Reference",
 };
 
@@ -69,16 +83,18 @@ const CATEGORY_ICONS: Record<DocumentCategory, React.FC<{ size?: number; classNa
   design: Layers,
   database: Database,
   architecture_image: FileImage,
+  source_code: FileText,
   other: FileText,
 };
 
-const ACCEPTED_EXTENSIONS = ".docx,.pdf,.md,.txt,.sql,.jpg,.jpeg,.png";
+const ACCEPTED_EXTENSIONS = ".docx,.pdf,.md,.txt,.sql,.jpg,.jpeg,.png,.java,.xml,.sh,.json,.yaml,.yml,.plsql";
 
 function detectCategory(file: File): DocumentCategory {
   const name = file.name.toLowerCase();
   const ext = name.split(".").pop() || "";
-  if (ext === "sql") return "database";
+  if (ext === "sql" || ext === "plsql") return "database";
   if (["jpg", "jpeg", "png"].includes(ext)) return "architecture_image";
+  if (["java", "xml", "sh", "json", "yaml", "yml"].includes(ext)) return "source_code";
   if (/req|requirement|spec|user.?story|brd|prd|functional/i.test(name)) return "requirement";
   if (/design|arch|diagram|flow|wireframe|ui|ux/i.test(name)) return "design";
   if (["docx", "pdf", "md", "txt"].includes(ext)) return "requirement";
@@ -102,6 +118,9 @@ export default function TestCaseGeneratorPage() {
   const [testCases, setTestCases] = useState<GeneratedTestCase[]>([]);
   const [summary, setSummary] = useState<TcgGenerationSummary | null>(null);
   const [flows, setFlows] = useState<BusinessFlow[]>([]);
+  const [missingInfo, setMissingInfo] = useState<MissingInformation[]>([]);
+  const [sourceConflicts, setSourceConflicts] = useState<SourceConflict[]>([]);
+  const [techEntities, setTechEntities] = useState<TechnicalEntity[]>([]);
   const [progress, setProgress] = useState<TcgProgress>({
     phase: "upload", currentStep: "", progress: 0, totalFiles: 0, processedFiles: 0,
   });
@@ -114,7 +133,19 @@ export default function TestCaseGeneratorPage() {
   const [editData, setEditData] = useState<Partial<GeneratedTestCase>>({});
   const [selectedCases, setSelectedCases] = useState<Set<string>>(new Set());
   const [showFinalized, setShowFinalized] = useState(false);
+  const [showSidekickSettings, setShowSidekickSettings] = useState(false);
+  const [showImportPanel, setShowImportPanel] = useState(false);
+  const [sidekickEndpoint, setSidekickEndpoint] = useState(() => getSidekickApiConfig()?.endpoint || "");
+  const [sidekickApiKey, setSidekickApiKey] = useState(() => getSidekickApiConfig()?.apiKey || "");
+  const [sidekickModel, setSidekickModel] = useState(() => getSidekickApiConfig()?.model || "");
+  const [sidekickApiStatus, setSidekickApiStatus] = useState<"idle" | "calling" | "success" | "error">("idle");
+  const [sidekickApiError, setSidekickApiError] = useState("");
+  const [clipboardStatus, setClipboardStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [importText, setImportText] = useState("");
+  const [importResult, setImportResult] = useState<"" | "success" | "partial" | "error">("");
+  const [importMessage, setImportMessage] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const importTextRef = useRef<HTMLTextAreaElement>(null);
 
   // --- File Upload ---
   const handleFiles = useCallback((files: FileList | null) => {
@@ -161,17 +192,40 @@ export default function TestCaseGeneratorPage() {
       setDocuments([...updatedDocs]);
     }
 
-    // Phase 2: Extract knowledge
+    // Phase 2: Full source-aware analysis
     setPhase("analyzing");
-    setProgress(prev => ({ ...prev, phase: "analyzing", currentStep: "Extracting requirements and business rules...", progress: 45 }));
-    const extractedKnowledge = extractKnowledge(updatedDocs);
-    setKnowledge(extractedKnowledge);
+    setProgress(prev => ({ ...prev, phase: "analyzing", currentStep: "Extracting technical entities and knowledge...", progress: 35 }));
+    await new Promise(r => setTimeout(r, 200));
 
-    // Phase 3: Generate (full pipeline)
+    setProgress(prev => ({ ...prev, currentStep: "Reconciling sources and detecting conflicts...", progress: 45 }));
+    await new Promise(r => setTimeout(r, 200));
+
+    setProgress(prev => ({ ...prev, currentStep: "Analyzing missing information...", progress: 55 }));
+    await new Promise(r => setTimeout(r, 200));
+
+    const analysisResult = analyzeAll(updatedDocs);
+    setKnowledge(analysisResult.knowledge);
+    setMissingInfo(analysisResult.missingInformation);
+    setSourceConflicts(analysisResult.sourceConflicts);
+    setTechEntities(analysisResult.technicalEntities);
+
+    // Phase 3: Generate (full pipeline with source traceability)
     setProgress(prev => ({ ...prev, phase: "generating", currentStep: "Identifying business flows and designing E2E test cases...", progress: 70 }));
     await new Promise(r => setTimeout(r, 300));
 
-    const result = generateTestCases(extractedKnowledge, updatedDocs);
+    setProgress(prev => ({ ...prev, currentStep: "Building test cases from source evidence...", progress: 80 }));
+    await new Promise(r => setTimeout(r, 200));
+
+    setProgress(prev => ({ ...prev, currentStep: "Validating completeness and coverage...", progress: 90 }));
+    await new Promise(r => setTimeout(r, 200));
+
+    const result = generateTestCases(analysisResult.knowledge, updatedDocs, {
+      requirements: analysisResult.requirements,
+      flows: analysisResult.flows,
+      missingInformation: analysisResult.missingInformation,
+      technicalEntities: analysisResult.technicalEntities,
+      knownTables: analysisResult.knownTables,
+    });
     setTestCases(result.cases);
     setSummary(result.summary);
     setFlows(result.flows);
@@ -231,7 +285,7 @@ export default function TestCaseGeneratorPage() {
 
   const deselectAll = useCallback(() => setSelectedCases(new Set()), []);
 
-  // --- Export ---
+  // --- Export (exclude ignored) ---
   const handleExportXlsx = useCallback(async () => {
     const casesToExport = selectedCases.size > 0 ? testCases.filter(tc => selectedCases.has(tc.id)) : testCases;
     await exportToXlsx(casesToExport);
@@ -247,10 +301,83 @@ export default function TestCaseGeneratorPage() {
     exportToCsv(casesToExport);
   }, [testCases, selectedCases]);
 
+  // --- Sidekick Integration: Copy Prompt ---
+  const handleCopySidekickPrompt = useCallback(async () => {
+    const result = await copyPromptToClipboard(testCases, knowledge, summary!);
+    if (result.success) {
+      setClipboardStatus("copied");
+      setTimeout(() => setClipboardStatus("idle"), 3000);
+    } else {
+      setClipboardStatus("error");
+      setTimeout(() => setClipboardStatus("idle"), 3000);
+    }
+  }, [testCases, knowledge, summary]);
+
+  // --- Sidekick Integration: Direct API Call ---
+  const handleDirectApiCall = useCallback(async () => {
+    if (!sidekickEndpoint || !sidekickApiKey) return;
+    setSidekickApiStatus("calling");
+    setSidekickApiError("");
+
+    // Save config to memory
+    setSidekickApiConfig({ endpoint: sidekickEndpoint, apiKey: sidekickApiKey, model: sidekickModel || undefined });
+
+    const result = await callSidekickDirectApi(testCases, knowledge, summary!);
+    if (result.success) {
+      // Parse the response
+      const parsed = parseSidekickResponse(result.response);
+      const mergeResult = mergeAiEnhancedCases(testCases, parsed.enhancedCases);
+      if (mergeResult.added.length > 0) {
+        setTestCases((prev) => [...prev, ...mergeResult.added]);
+        setSidekickApiStatus("success");
+        setImportMessage(`Added ${mergeResult.added.length} AI-enhanced test cases. ${mergeResult.duplicatesSkipped} duplicates skipped.`);
+        setImportResult("success");
+        // Update summary counts
+        setSummary((prev) => prev ? { ...prev, finalTestCases: prev.finalTestCases + mergeResult.added.length } : prev);
+      } else {
+        setSidekickApiStatus("error");
+        setSidekickApiError("No new test cases extracted from AI response. Try the manual copy-paste approach.");
+      }
+    } else {
+      setSidekickApiStatus("error");
+      setSidekickApiError(result.error || "API call failed");
+    }
+  }, [sidekickEndpoint, sidekickApiKey, sidekickModel, testCases, knowledge, summary]);
+
+  // --- Sidekick Integration: Save API Settings ---
+  const handleSaveApiSettings = useCallback(() => {
+    if (sidekickEndpoint && sidekickApiKey) {
+      setSidekickApiConfig({ endpoint: sidekickEndpoint, apiKey: sidekickApiKey, model: sidekickModel || undefined });
+    } else {
+      setSidekickApiConfig(null);
+    }
+  }, [sidekickEndpoint, sidekickApiKey, sidekickModel]);
+
+  // --- Sidekick Integration: Import Pasted Response ---
+  const handleImportResponse = useCallback(() => {
+    if (!importText.trim()) return;
+    const parsed = parseSidekickResponse(importText);
+    if (parsed.enhancedCases.length === 0) {
+      setImportResult("error");
+      setImportMessage("Could not parse any test cases from the pasted response. Make sure you pasted the full Sidekick output.");
+      return;
+    }
+    const mergeResult = mergeAiEnhancedCases(testCases, parsed.enhancedCases);
+    if (mergeResult.added.length > 0) {
+      setTestCases((prev) => [...prev, ...mergeResult.added]);
+      setImportResult("success");
+      setImportMessage(`Added ${mergeResult.added.length} AI-enhanced test cases. ${mergeResult.duplicatesSkipped} duplicates skipped.${parsed.newEdgeCases.length > 0 ? ` ${parsed.newEdgeCases.length} new edge cases suggested.` : ""}`);
+      setSummary((prev) => prev ? { ...prev, finalTestCases: prev.finalTestCases + mergeResult.added.length } : prev);
+    } else {
+      setImportResult("partial");
+      setImportMessage(`Parsed ${parsed.enhancedCases.length} test case(s), but all matched existing cases (${mergeResult.duplicatesSkipped} duplicates). No new cases added.`);
+    }
+  }, [importText, testCases]);
+
   const handleFinalize = useCallback(() => setShowFinalized(true), []);
 
   const handleReset = useCallback(() => {
-    setDocuments([]); setKnowledge([]); setTestCases([]); setSummary(null); setFlows([]);
+    setDocuments([]); setKnowledge([]); setTestCases([]); setSummary(null); setFlows([]); setMissingInfo([]); setSourceConflicts([]); setTechEntities([]);
     setPhase("upload"); setSelectedCases(new Set()); setShowFinalized(false);
     setExpandedCase(null); setEditingCase(null);
   }, []);
@@ -406,6 +533,9 @@ export default function TestCaseGeneratorPage() {
                 <SummaryStat label="P3 Low" value={summary.p3Count} icon={Shield} color="text-slate-400" />
                 <SummaryStat label="DB Validation" value={summary.dbValidationCases} icon={Database} />
                 <SummaryStat label="Optimized From" value={summary.candidateScenarios} sub={`${summary.duplicatesRemoved} removed`} />
+                <SummaryStat label="Complete" value={summary.completeTestCases} icon={CheckCircle2} color="text-emerald-400" />
+                <SummaryStat label="Incomplete" value={summary.incompleteTestCases} icon={AlertCircle} color="text-amber-400" />
+                <SummaryStat label="Missing Info" value={summary.technicalEntitiesMissing} icon={AlertCircle} color="text-amber-400" />
               </div>
               {summary.flowNames.length > 0 && (
                 <div className="mt-3 flex flex-wrap gap-1.5">
@@ -417,6 +547,200 @@ export default function TestCaseGeneratorPage() {
               )}
             </div>
           )}
+
+          {/* === MISSING INFORMATION === */}
+          {missingInfo.length > 0 && (
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.03] p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <AlertCircle size={16} className="text-amber-400" />
+                <h3 className="text-sm font-semibold text-white">⚠️ Additional Information Required ({missingInfo.length} items)</h3>
+              </div>
+              <p className="text-[11px] text-slate-400 mb-3">
+                Some technical entities are referenced in source material but detailed definitions were not found. Test cases are marked INCOMPLETE where affected.
+              </p>
+              <div className="flex flex-col gap-2">
+                {missingInfo.map(mi => (
+                  <div key={mi.id} className="flex items-start gap-3 rounded-lg border border-white/[0.04] bg-black/10 p-3">
+                    <span className="text-amber-400 mt-0.5">🟡</span>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-medium text-white">{mi.entityName}</span>
+                        <span className="rounded bg-white/[0.04] px-1.5 py-0.5 text-[9px] text-slate-400">{mi.entityKind}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-1">{mi.reason}</div>
+                      <div className="text-[10px] text-slate-500 mt-1">Required for: {mi.requiredFor}</div>
+                      <div className="text-[10px] text-slate-500">Source: {mi.sourceRef}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* === SOURCE CONFLICTS === */}
+          {sourceConflicts.length > 0 && (
+            <div className="rounded-xl border border-red-500/20 bg-red-500/[0.03] p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <AlertCircle size={16} className="text-red-400" />
+                <h3 className="text-sm font-semibold text-white">⚠️ Source Conflicts Detected ({sourceConflicts.length})</h3>
+              </div>
+              <div className="flex flex-col gap-2">
+                {sourceConflicts.map(conflict => (
+                  <div key={conflict.id} className="rounded-lg border border-white/[0.04] bg-black/10 p-3">
+                    <div className="text-xs font-medium text-white">{conflict.entityName}</div>
+                    <div className="text-[11px] text-slate-400 mt-1">{conflict.description}</div>
+                    <div className="text-[10px] text-slate-500 mt-1">Conflicting values: {conflict.conflictingValues.join(", ")}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* === SIDEKICK INTEGRATION === */}
+          <div className="rounded-xl border border-purple-500/20 bg-purple-500/[0.03] p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles size={16} className="text-purple-400" />
+                <h3 className="text-sm font-semibold text-white">Sidekick AI Integration</h3>
+                {isDirectApiAvailable() && <span className="rounded bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 text-[9px] text-emerald-400">API Connected</span>}
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setShowSidekickSettings(!showSidekickSettings)}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/[0.07]">
+                  ⚙️ API Settings
+                </button>
+                <button onClick={() => setShowImportPanel(!showImportPanel)}
+                  className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] text-slate-300 hover:bg-white/[0.07]">
+                  📋 Import Response
+                </button>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-slate-400 mb-4 leading-relaxed">
+              Enhance your test cases with Sidekick AI. Choose one of two approaches:
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Approach 1: Copy Prompt → Sidekick → Paste Response */}
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="rounded bg-purple-500/10 px-2 py-0.5 text-[10px] font-medium text-purple-300">Approach 1</span>
+                  <span className="text-[10px] text-slate-400">Manual Copy-Paste</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
+                  Copy a structured prompt with all test cases → paste into Sidekick → paste Sidekick's response back.
+                  Works even when Sidekick has CORS restrictions.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button onClick={handleCopySidekickPrompt} disabled={testCases.length === 0}
+                    className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50">
+                    {clipboardStatus === "copied" ? "✅ Copied!" : "📋 Copy Prompt to Clipboard"}
+                  </button>
+                  {clipboardStatus === "copied" && <span className="text-[10px] text-emerald-400">Now paste into Sidekick chat</span>}
+                  {clipboardStatus === "error" && <span className="text-[10px] text-red-400">Copy failed — try again</span>}
+                </div>
+                <div className="mt-2 text-[10px] text-slate-500">
+                  Steps: 1) Click Copy → 2) Open Sidekick → 3) Paste & Send → 4) Copy Sidekick response → 5) Click "Import Response" above
+                </div>
+              </div>
+
+              {/* Approach 2: Direct API Call */}
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="rounded bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium text-cyan-300">Approach 2</span>
+                  <span className="text-[10px] text-slate-400">Direct API Call</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
+                  Automatically sends test cases to Sidekick API and merges the response. Requires API endpoint + key from DevTools network inspection.
+                </p>
+                {isDirectApiAvailable() ? (
+                  <div className="flex items-center gap-2">
+                    <button onClick={handleDirectApiCall} disabled={sidekickApiStatus === "calling"}
+                      className="flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-2 text-xs font-medium text-white hover:bg-cyan-500 disabled:opacity-50">
+                      {sidekickApiStatus === "calling" ? "⏳ Calling Sidekick..." : "🚀 Call Sidekick API"}
+                    </button>
+                    {sidekickApiStatus === "success" && <span className="text-[10px] text-emerald-400">✅ {importMessage}</span>}
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-[10px] text-amber-400 mb-2">
+                      ⚠️ Not configured. Click "⚙️ API Settings" to add your Sidekick endpoint and API key.
+                    </p>
+                    <p className="text-[10px] text-slate-500">
+                      To find these: Open Sidekick in browser → F12 → Network tab → send a message → inspect the XHR request URL and Authorization header.
+                    </p>
+                  </div>
+                )}
+                {sidekickApiError && (
+                  <div className="mt-2 rounded-lg border border-red-500/20 bg-red-500/5 p-2">
+                    <p className="text-[10px] text-red-300">{sidekickApiError}</p>
+                    <p className="text-[10px] text-slate-500 mt-1">Try Approach 1 (manual copy-paste) instead.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* API Settings Panel (collapsible) */}
+            {showSidekickSettings && (
+              <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/20 p-4">
+                <h4 className="text-xs font-semibold text-white mb-3">Sidekick API Settings</h4>
+                <p className="text-[10px] text-slate-500 mb-3">
+                  To find these values: Open Sidekick → F12 DevTools → Network tab → send a chat message → inspect the XHR request.
+                  Copy the request URL as the Endpoint and the Authorization header value as the API Key.
+                </p>
+                <div className="grid grid-cols-1 gap-3">
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">API Endpoint URL</label>
+                    <input type="text" value={sidekickEndpoint} onChange={(e) => setSidekickEndpoint(e.target.value)}
+                      placeholder="https://genai.highmark.cloud/sidekick/api/v1/chat/completions"
+                      className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-200 font-mono outline-none focus:border-cyan-500/30 placeholder:text-slate-600" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">API Key / Bearer Token</label>
+                    <input type="password" value={sidekickApiKey} onChange={(e) => setSidekickApiKey(e.target.value)}
+                      placeholder="sk-... or Bearer token from Network tab"
+                      className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-200 font-mono outline-none focus:border-cyan-500/30 placeholder:text-slate-600" />
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">Model (optional)</label>
+                    <input type="text" value={sidekickModel} onChange={(e) => setSidekickModel(e.target.value)}
+                      placeholder="e.g. gpt-4, claude-3-sonnet"
+                      className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-200 outline-none focus:border-cyan-500/30 placeholder:text-slate-600" />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                  <button onClick={handleSaveApiSettings}
+                    className="flex items-center gap-1.5 rounded-lg bg-cyan-600 px-3 py-1.5 text-xs text-white hover:bg-cyan-500">
+                    Save Settings (Memory Only)
+                  </button>
+                  <span className="text-[10px] text-slate-500">Stored in browser memory only. Not saved to disk.</span>
+                </div>
+              </div>
+            )}
+
+            {/* Import Response Panel (collapsible) */}
+            {showImportPanel && (
+              <div className="mt-4 rounded-lg border border-white/[0.06] bg-black/20 p-4">
+                <h4 className="text-xs font-semibold text-white mb-2">Import Sidekick Response</h4>
+                <p className="text-[10px] text-slate-500 mb-3">
+                  Paste the Sidekick AI response here. The parser will extract enhanced test cases and merge them with your existing set.
+                </p>
+                <textarea ref={importTextRef} value={importText} onChange={(e) => setImportText(e.target.value)}
+                  placeholder="Paste Sidekick's response here..."
+                  rows={10}
+                  className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-slate-200 font-mono outline-none focus:border-cyan-500/30 placeholder:text-slate-600 resize-y" />
+                <div className="flex items-center gap-2 mt-3">
+                  <button onClick={handleImportResponse} disabled={!importText.trim()}
+                    className="flex items-center gap-1.5 rounded-lg bg-purple-600 px-3 py-2 text-xs font-medium text-white hover:bg-purple-500 disabled:opacity-50">
+                    📥 Parse & Import Test Cases
+                  </button>
+                  {importResult === "success" && <span className="text-[10px] text-emerald-400">✅ {importMessage}</span>}
+                  {importResult === "partial" && <span className="text-[10px] text-amber-400">⚠️ {importMessage}</span>}
+                  {importResult === "error" && <span className="text-[10px] text-red-400">❌ {importMessage}</span>}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Stats Bar */}
           <div className="flex flex-wrap items-center gap-3 rounded-xl border border-white/[0.06] bg-[#0c1118] p-4">
@@ -594,6 +918,8 @@ function TestCaseRow({ tc, isExpanded, isEditing, editData, isSelected,
           ))}
         </div>
         <span className="text-[10px] text-slate-500 shrink-0 max-w-[120px] truncate">{tc.businessFlow}</span>
+        {tc.completeness === "INCOMPLETE" && <span className="rounded bg-amber-500/10 border border-amber-500/30 px-1.5 py-0.5 text-[9px] text-amber-400 shrink-0">🟡 INCOMPLETE</span>}
+        {tc.completeness === "COMPLETE" && <span className="rounded bg-emerald-500/10 border border-emerald-500/30 px-1.5 py-0.5 text-[9px] text-emerald-400 shrink-0">✓ COMPLETE</span>}
         {tc.status === "ignored" && <span className="text-[10px] text-slate-500 shrink-0">Ignored</span>}
         {tc.status === "edited" && <span className="text-[10px] text-amber-400 shrink-0">Edited</span>}
       </div>
@@ -663,6 +989,28 @@ function TestCaseRow({ tc, isExpanded, isEditing, editData, isSelected,
 
               <DetailSection title="Expected Results" content={effective.expectedResults} />
               {tc.riskRationale && <DetailSection title="Risk Rationale" content={tc.riskRationale} />}
+              {tc.incompleteReasons.length > 0 && (
+                <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.03] p-3">
+                  <span className="text-[11px] font-medium text-amber-400">⚠️ Incomplete — Missing Information</span>
+                  <div className="flex flex-col gap-1 mt-2">
+                    {tc.incompleteReasons.map((reason, i) => (
+                      <div key={i} className="text-[11px] text-slate-400">• {reason}</div>
+                    ))}
+                  </div>
+                  {tc.missingEntities.length > 0 && (
+                    <div className="text-[10px] text-slate-500 mt-2">
+                      Missing entities: {tc.missingEntities.join(", ")}
+                    </div>
+                  )}
+                </div>
+              )}
+              {tc.queryStatus === "INCOMPLETE" && (
+                <div className="flex flex-col gap-1">
+                  <span className="text-[11px] font-medium text-amber-400">🟡 Query Pending</span>
+                  <p className="text-[11px] text-slate-400">{tc.query}</p>
+                  {tc.queryIncompleteReason && <p className="text-[10px] text-slate-500">{tc.queryIncompleteReason}</p>}
+                </div>
+              )}
 
               {tc.sources.length > 0 && (
                 <div className="flex flex-col gap-1">

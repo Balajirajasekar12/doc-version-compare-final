@@ -1,6 +1,6 @@
 // ============================================================
-// Requirement → Test Case Generator — Types (Redesigned)
-// Business-flow-first, risk-based, E2E test design engine.
+// Requirement → Test Case Generator — Types (v3)
+// Source-truth-based, completeness-aware, E2E manual test design.
 // ============================================================
 
 // --- Input Document Categories ---
@@ -9,12 +9,14 @@ export type DocumentCategory =
   | "design"
   | "database"
   | "architecture_image"
+  | "source_code"
   | "other";
 
 // --- Supported file types ---
 export type SupportedExtension =
   | ".docx" | ".pdf" | ".md" | ".txt"
-  | ".sql" | ".jpg" | ".jpeg" | ".png";
+  | ".sql" | ".jpg" | ".jpeg" | ".png"
+  | ".java" | ".xml" | ".sh" | ".json" | ".yaml" | ".yml" | ".plsql";
 
 // --- Uploaded Document ---
 export interface TcgDocument {
@@ -98,11 +100,69 @@ export interface SqlConstraint {
   definition: string;
 }
 
-// --- Extracted Knowledge (normalized from all documents) ---
+// ============================================================
+// SOURCE EVIDENCE & CONFIDENCE
+// ============================================================
+
+export type SourceConfidence =
+  | "CONFIRMED"   // Explicitly found in source
+  | "REFERENCED"  // Mentioned but not fully defined
+  | "MISSING"     // Required but unavailable
+  | "CONFLICT";   // Different sources disagree
+
+export interface SourceEvidence {
+  documentId: string;
+  documentName: string;
+  sectionRef: string;
+  kind: "requirement" | "design" | "database" | "architecture" | "source_code" | "other";
+  excerpt?: string;  // Exact text from source
+  lineRef?: string;  // e.g., "BillingService.java:348"
+}
+
+// ============================================================
+// TECHNICAL ENTITY EXTRACTION
+// ============================================================
+
+export type TechnicalEntityKind =
+  | "table"
+  | "column"
+  | "class"
+  | "dto"
+  | "method"
+  | "service"
+  | "api"
+  | "enum"
+  | "exception"
+  | "error_code"
+  | "stored_procedure"
+  | "function"
+  | "trigger"
+  | "job"
+  | "shell_command"
+  | "queue"
+  | "configuration"
+  | "field"
+  | "constraint";
+
+export interface TechnicalEntity {
+  id: string;
+  name: string;
+  kind: TechnicalEntityKind;
+  sourceEvidence: SourceEvidence[];
+  confidence: SourceConfidence;
+  details?: string;  // e.g., column definition, method signature
+  referencedBy?: string[];  // IDs of other entities that reference this one
+}
+
+// ============================================================
+// EXTRACTED KNOWLEDGE (enhanced with source traceability)
+// ============================================================
+
 export interface ExtractedKnowledge {
   id: string;
   documentId: string;
   sourceRef: string;
+  sourceEvidence: SourceEvidence[];
   kind:
     | "requirement_statement"
     | "business_rule"
@@ -117,44 +177,93 @@ export interface ExtractedKnowledge {
     | "architecture_flow"
     | "field_definition"
     | "status_behavior"
-    | "boundary_condition";
+    | "boundary_condition"
+    | "code_logic"
+    | "job_definition"
+    | "api_definition";
   text: string;
-  confidence: "high" | "medium" | "low";
+  confidence: SourceConfidence;
   relatedTables: string[];
   relatedFields: string[];
+  relatedEntities: string[];  // IDs of TechnicalEntity items
   sectionRef?: string;
 }
 
-// --- Business Flow (NEW) ---
+// ============================================================
+// BUSINESS FLOW
+// ============================================================
+
 export interface BusinessFlow {
   id: string;
   name: string;
   description: string;
   steps: string[];
-  knowledgeIds: string[]; // knowledge items belonging to this flow
+  knowledgeIds: string[];
   upstreamSystems: string[];
   downstreamSystems: string[];
   databases: string[];
   jobs: string[];
+  classes: string[];
+  services: string[];
 }
 
-// --- Requirement (NEW) ---
+// ============================================================
+// REQUIREMENT
+// ============================================================
+
 export interface ExtractedRequirement {
   id: string;
   text: string;
   flowId: string | null;
   sourceRef: string;
+  sourceEvidence: SourceEvidence[];
   kind: "functional" | "validation" | "business_rule" | "boundary" | "error_handling" | "database" | "integration" | "ui";
-  sourceKnowledgeId: string; // explicit link to the originating knowledge item
-  relatedTables: string[];   // carried from knowledge for flow grouping
-  relatedFields: string[];   // carried from knowledge for flow grouping
+  sourceKnowledgeId: string;
+  relatedTables: string[];
+  relatedFields: string[];
+  relatedEntities: string[];
+  coverageStatus: "COVERED" | "PARTIALLY_COVERED" | "NOT_COVERED";
 }
 
-// --- Test Case Generation ---
+// ============================================================
+// MISSING INFORMATION
+// ============================================================
+
+export interface MissingInformation {
+  id: string;
+  entityName: string;
+  entityKind: TechnicalEntityKind;
+  reason: string;       // Why it's needed
+  sourceRef: string;    // Where it was referenced
+  requiredFor: string;  // e.g., "DB validation step", "Request creation"
+  affectedFlows: string[];
+  affectedRequirements: string[];
+}
+
+// ============================================================
+// SOURCE CONFLICT
+// ============================================================
+
+export interface SourceConflict {
+  id: string;
+  entityName: string;
+  sources: SourceEvidence[];
+  conflictingValues: string[];
+  description: string;
+}
+
+// ============================================================
+// TEST CASE TYPES
+// ============================================================
+
 export type TestCaseGenType = "Functional" | "Regression" | "Negative" | "Positive";
 export type TestPriority = "P0" | "P1" | "P2" | "P3";
+export type TestCaseStatus = "COMPLETE" | "INCOMPLETE" | "IGNORED";
 
-// --- Generated TestCase (redesigned) ---
+// ============================================================
+// GENERATED TEST CASE (redesigned with completeness)
+// ============================================================
+
 export interface GeneratedTestCase {
   id: string;
   caseNumber: string;
@@ -162,6 +271,8 @@ export interface GeneratedTestCase {
   steps: string;
   precondition: string;
   query: string;
+  queryStatus: "COMPLETE" | "INCOMPLETE" | "NOT_REQUIRED";
+  queryIncompleteReason?: string;
   expectedResults: string;
   types: TestCaseGenType[];
   priority: TestPriority;
@@ -170,6 +281,9 @@ export interface GeneratedTestCase {
   sources: TestCaseSource[];
   riskRationale: string;
   status: "kept" | "ignored" | "edited";
+  completeness: TestCaseStatus;
+  incompleteReasons: string[];  // List of what's missing
+  missingEntities: string[];    // Technical entities that couldn't be resolved
   originalData: Omit<GeneratedTestCase, "status" | "originalData">;
   editedFields?: Partial<Pick<GeneratedTestCase,
     "description" | "steps" | "precondition" | "query" | "expectedResults" | "types" | "priority" | "businessFlow"
@@ -180,10 +294,14 @@ export interface TestCaseSource {
   documentId: string;
   documentName: string;
   sectionRef: string;
-  kind: "requirement" | "design" | "database" | "architecture" | "other";
+  kind: "requirement" | "design" | "database" | "architecture" | "source_code" | "other";
+  excerpt?: string;
 }
 
-// --- Generation Summary (NEW) ---
+// ============================================================
+// GENERATION SUMMARY (enhanced)
+// ============================================================
+
 export interface TcgGenerationSummary {
   businessFlows: number;
   requirementsAnalyzed: number;
@@ -191,20 +309,33 @@ export interface TcgGenerationSummary {
   duplicatesRemoved: number;
   optimizedScenarios: number;
   finalTestCases: number;
+  completeTestCases: number;
+  incompleteTestCases: number;
   p0Count: number;
   p1Count: number;
   p2Count: number;
   p3Count: number;
-  requirementCoverage: number; // percentage
+  requirementCoverage: number;
   totalRequirements: number;
   coveredRequirements: number;
+  partiallyCoveredRequirements: number;
   uncoveredRequirements: string[];
+  uncoveredRequirementDetails: { id: string; text: string; reason: string }[];
   dbValidationCases: number;
+  dbValidationIncomplete: number;
   e2eFlows: number;
   flowNames: string[];
+  missingInformation: MissingInformation[];
+  sourceConflicts: SourceConflict[];
+  technicalEntitiesFound: number;
+  technicalEntitiesReferenced: number;
+  technicalEntitiesMissing: number;
 }
 
-// --- Generation Progress ---
+// ============================================================
+// GENERATION PROGRESS
+// ============================================================
+
 export type TcgPhase =
   | "upload"
   | "parsing"
@@ -216,19 +347,25 @@ export type TcgPhase =
 export interface TcgProgress {
   phase: TcgPhase;
   currentStep: string;
-  progress: number; // 0-100
+  progress: number;
   totalFiles: number;
   processedFiles: number;
 }
 
-// --- GenAI Provider Interface ---
+// ============================================================
+// GENAI PROVIDER
+// ============================================================
+
 export interface GenAIProvider {
   name: string;
   isAvailable(): boolean;
   generateTestCases(knowledge: ExtractedKnowledge[]): Promise<Partial<GeneratedTestCase>[]>;
 }
 
-// --- Export Types ---
+// ============================================================
+// EXPORT TYPES
+// ============================================================
+
 export interface TcgExportRow {
   testCaseId: string;
   description: string;
@@ -242,4 +379,6 @@ export interface TcgExportRow {
   requirementTraceability: string;
   sourceTraceability: string;
   riskRationale: string;
+  status: string;
+  incompleteReasons: string;
 }
