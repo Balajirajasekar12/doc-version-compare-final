@@ -1239,10 +1239,11 @@ function updateAnchorsString(
 
     // Update <a:off x> and <a:off y> inside <xdr:spPr><a:xfrm> to match the new anchor position.
     // Some viewers/renderers use this absolute position independently of <xdr:from>.
-    const spPrTag = `<${tag("spPr")}>`;
+    // NOTE: spPr may have attributes like bwMode="auto" so search without closing >.
+    const spPrOpen = `<${tag("spPr")}`;
     const xfrmTag = `<a:xfrm>`;
     const offTag = `<a:off`;
-    const spPrIdx = updatedBlock.indexOf(spPrTag);
+    const spPrIdx = updatedBlock.indexOf(spPrOpen);
     if (spPrIdx !== -1) {
       const xfrmIdx = updatedBlock.indexOf(xfrmTag, spPrIdx);
       if (xfrmIdx !== -1) {
