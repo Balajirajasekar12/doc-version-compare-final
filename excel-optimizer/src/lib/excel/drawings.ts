@@ -29,7 +29,7 @@ import {
   parseXml,
   textContent,
 } from "./xml";
-import { ParsedSheet } from "./worksheet";
+import { ParsedSheet, parseSheet } from "./worksheet";
 import { debugLog } from "./debug-log";
 
 /**
@@ -150,9 +150,8 @@ function findLogicalDrawings(root: XmlEl): Array<{
 
 
 /** EMU per pixel (914400 EMU per inch / 96 px per inch). */
-const EMU_PER_PX = 9525;
-/** Pixels added between drawings that were pushed apart. */
-const SPACING_PX = 25;
+const EMU_PER_PX = 9525;  /** Pixels added between drawings that were pushed apart. */
+const SPACING_PX = 1;
 /** Row spacing between grid rows of images (in points). */
 const GRID_ROW_GAP_PT = 8;
 const DEFAULT_COL_WIDTH = 8.43; // characters
@@ -481,6 +480,235 @@ async function processVmlDrawings(
   return moved;
 }
 
+/**
+ * A content block: a group of consecutive rows with non-empty cells.
+ * Images overlapping this block should be placed just below it.
+ */
+interface ContentBlock {
+  startRow: number; // 1-based
+  endRow: number;   // 1-based
+  startY: number;   // EMU — top of startRow
+  endY: number;     // EMU — bottom of endRow
+}
+
+/**
+ * Finds all content blocks in a worksheet.
+ * A content block is a group of consecutive rows with non-empty cells,
+ * separated from other blocks by gaps of >3 empty rows.
+ */
+function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): ContentBlock[] {
+  const contentRows = new Set<number>();
+  for (const [row, cells] of sheet.cells) {
+    for (const cell of cells.values()) {
+      if (cell.text?.trim()) {
+        contentRows.add(row);
+        break;
+      }
+    }
+  }
+  const sorted = Array.from(contentRows).sort((a, b) => a - b);
+  if (sorted.length === 0) return [];
+
+  const blocks: ContentBlock[] = [];
+  let blockStart = sorted[0];
+  let blockEnd = sorted[0];
+
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] - blockEnd > 3) {
+      // Gap > 3 rows → new block
+      blocks.push({
+        startRow: blockStart,
+        endRow: blockEnd,
+        startY: geom.rowStart(blockStart - 1),
+        endY: geom.rowStart(blockEnd),
+      });
+    blockStart = sorted[i];
+    }
+    blockEnd = sorted[i];
+  }
+  blocks.push({
+    startRow: blockStart,
+    endRow: blockEnd,
+    startY: geom.rowStart(blockStart - 1),
+    endY: geom.rowStart(blockEnd),
+  });
+
+  return blocks;
+}
+
+/**
+ * Assigns each image to the content block it overlaps, then places each
+ * group of images immediately after its respective block.
+ *
+ * If images for a block extend into the next block, rows are inserted to
+ * push subsequent content down, preserving document flow:
+ *
+ *   Block A → Images A → Block B → Images B → Block C → ...
+ *
+ * Returns the number of images that were repositioned.
+ */
+async function placeImagesByBlock(
+  rects: AnchorRect[],
+  blocks: ContentBlock[],
+  geom: DrawingGeometry,
+  sheet: ParsedSheet,
+  zip: Zip,
+  sheetFile: string,
+  cellMapping: Map<string, string>,
+): Promise<number> {
+  if (rects.length === 0 || blocks.length === 0) return 0;
+
+  // Step 1: Classify each image as overlapping a block, or already safe.
+  // An image is "safe" if it's below ALL content blocks and not overlapping anything.
+  const blockImages: AnchorRect[][] = blocks.map(() => []);
+  const unassigned: AnchorRect[] = [];
+  const alreadySafe: AnchorRect[] = [];
+
+  const lastBlockEndY = blocks.length > 0 ? blocks[blocks.length - 1].endY : 0;
+
+  for (const r of rects) {
+    const imgStartY = r.y1;
+    const imgEndY = r.y1 + r.h;
+
+    // Check if image overlaps any content block.
+    let overlapsBlock = false;
+    for (let b = 0; b < blocks.length; b++) {
+      const block = blocks[b];
+      // Strict overlap: image must actually intersect the block's vertical range.
+      // Use image midpoint for assignment — the block whose range contains the
+      // image's center gets the image.
+      const imgMidY = (imgStartY + imgEndY) / 2;
+      if (imgMidY >= block.startY && imgMidY <= block.endY + SPACING_PX * EMU_PER_PX) {
+        blockImages[b].push(r);
+        overlapsBlock = true;
+        break;
+      }
+    }
+
+    if (!overlapsBlock) {
+      // Image doesn't midpoint-overlap any block.
+      // Check if the FULL image intersects ANY block.
+      let fullOverlapBlock = -1;
+      for (let b = 0; b < blocks.length; b++) {
+        const block = blocks[b];
+        // Full overlap: image's vertical extent intersects block's range.
+        if (imgStartY <= block.endY && imgEndY >= block.startY) {
+          fullOverlapBlock = b;
+          break;
+        }
+      }
+      if (fullOverlapBlock >= 0) {
+        // Image overlaps a block — assign to it.
+        blockImages[fullOverlapBlock].push(r);
+      } else {
+        // Image doesn't overlap ANY block — it's already safe, leave it alone.
+        alreadySafe.push(r);
+      }
+    }
+  }
+
+  debugLog.log("DRAWING", `  placeImagesByBlock: ${rects.length - alreadySafe.length} images overlap blocks, ${alreadySafe.length} already safe`);
+
+  // Step 2: Place each block's images right after that block, in document flow.
+  // Block A → Images A → Block B → Images B → ...
+  // When images extend into the next block, insert rows to push content down.
+  let moved = 0;
+  let cumulativeRowInsert = 0; // track rows inserted so far (for row insertion offset)
+  let currentGeom = geom; // geometry updated after each row insertion
+  const avgRowH = geom.defaultRowHeight * 12700; // EMU
+
+  for (let b = 0; b < blocks.length; b++) {
+    const images = blockImages[b];
+    if (images.length === 0) continue;
+
+    // Sort images by original Y position.
+    images.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
+
+    // Calculate where this block ends (EMU) using current geometry.
+    const blockEndY = currentGeom.rowStart(blocks[b].endRow);
+    // Start placing images 1px below the block.
+    let currentY = blockEndY + EMU_PER_PX;
+
+    // Place images stacked vertically at column A.
+    let imagesBottomY = currentY; // bottom of the last image placed
+    for (const img of images) {
+      if (img.newY1 !== currentY || img.x1 !== 0) {
+        img.newY1 = currentY;
+        const originalWidth = img.x2 - img.x1;
+        img.x1 = 0;
+        img.x2 = originalWidth;
+        moved++;
+      }
+      imagesBottomY = currentY + img.h;
+      currentY += img.h + EMU_PER_PX;
+    }
+    debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after rows ${blocks[b].startRow}-${blocks[b].endRow}`);
+
+    // Check if images extend into the next content block.
+    if (b + 1 < blocks.length) {
+      // The next block's top (EMU) using current (possibly updated) geometry.
+      const nextBlockTopY = currentGeom.rowStart(blocks[b + 1].startRow - 1);
+      if (imagesBottomY > nextBlockTopY) {
+        // Images extend into the next block — insert rows to push it down.
+        const overlapEmu = imagesBottomY - nextBlockTopY + avgRowH; // 1 row margin
+        const rowsNeeded = Math.ceil(overlapEmu / avgRowH);
+        if (rowsNeeded > 0) {
+          const insertAtRow = blocks[b + 1].startRow + cumulativeRowInsert;
+          const { xml: newSheetXml, cellMapping: newMapping } = insertRowsInWorksheet(
+            await readEntryText(zip, sheetFile) || '',
+            insertAtRow,
+            rowsNeeded,
+          );
+          // Merge cell mappings.
+          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          // Write updated sheet XML back to zip.
+          zip.file(sheetFile, newSheetXml);
+          cumulativeRowInsert += rowsNeeded;
+
+          // Update subsequent blocks' row numbers to account for insertion.
+          for (let j = b + 1; j < blocks.length; j++) {
+            blocks[j].startRow += rowsNeeded;
+            blocks[j].endRow += rowsNeeded;
+          }
+
+          // Re-parse the modified sheet to get correct geometry for subsequent blocks.
+          const modifiedSheetXml = await readEntryText(zip, sheetFile);
+          if (modifiedSheetXml && typeof modifiedSheetXml === "string") {
+            try {
+              const modifiedSheet = parseSheet(modifiedSheetXml, []);
+              currentGeom = new DrawingGeometry(modifiedSheet);
+            } catch {
+              // Fall back to original geom if re-parsing fails.
+            }
+          }
+
+          debugLog.log("DRAWING", `  inserted ${rowsNeeded} rows at row ${insertAtRow} to push content down`);
+        }
+      }
+    }
+  }
+
+  // Also place unassigned images (those not assigned to any block) after the last block.
+  if (unassigned.length > 0) {
+    const lastBlock = blocks[blocks.length - 1];
+    const lastBlockEndY = currentGeom.rowStart(lastBlock.endRow);
+    let currentY = lastBlockEndY + EMU_PER_PX; // immediately after the block
+    unassigned.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
+    for (const img of unassigned) {
+      if (img.newY1 !== currentY || img.x1 !== 0) {
+        img.newY1 = currentY;
+        const originalWidth = img.x2 - img.x1;
+        img.x1 = 0;
+        img.x2 = originalWidth;
+        moved++;
+      }
+      currentY += img.h + EMU_PER_PX;
+    }
+  }
+
+  return moved;
+}
+
 export async function fixDrawingOverlaps(
   zip: Zip,
   sheet: ParsedSheet,
@@ -599,36 +827,25 @@ export async function fixDrawingOverlaps(
     anchors: anchorInfos,
   };
 
-  // Find the first content gap (space between tables).
-  const gapInfo = findFirstContentGap(sheet, geom);
-  const contentBoundaryY = gapInfo.startY;
+  // Find ALL content blocks (groups of consecutive content rows).
+  const blocks = findAllContentBlocks(sheet, geom);
+  debugLog.log("DRAWING", `fixDrawingOverlaps: found ${blocks.length} content blocks`);
+  for (const b of blocks) {
+    debugLog.log("DRAWING", `  Block: rows ${b.startRow}-${b.endRow}`);
+  }
+
+  // Content boundary = bottom of ALL content (for overlap/conflict stats).
+  const contentBoundaryY = blocks.length > 0 ? blocks[blocks.length - 1].endY : 0;
   stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
 
-  // Calculate how many rows to insert if gap is too small for all images.
-  const SPACING_ROWS = 2;
-  let totalRowsNeeded = 0;
-  for (const r of rects) {
-    const imageHeightRows = Math.ceil(r.h / (15 * 12700));
-    totalRowsNeeded += imageHeightRows + SPACING_ROWS;
-  }
-  const gapRowsAvailable = gapInfo.gapRows;
-  const rowsToInsert = Math.max(0, totalRowsNeeded - gapRowsAvailable);
-
-  // Cell mapping: tracks how cell references shift due to row insertion.
+  // Cell mapping: tracks how cell references shift due to row insertions.
   let cellMapping = new Map<string, string>();
 
-  if (rowsToInsert > 0 && gapInfo.gapRows > 0) {
-    debugLog.log("DRAWING", `  gap too small: need ${totalRowsNeeded} rows, have ${gapRowsAvailable}, inserting ${rowsToInsert}`);
-    const sheetXml = await readEntryText(zip, sheetFile);
-    if (sheetXml && typeof sheetXml === "string") {
-      const { xml: modifiedSheetXml, cellMapping: mapping } = insertRowsInWorksheet(sheetXml, gapInfo.gapStartRow, rowsToInsert);
-      if (modifiedSheetXml !== sheetXml) {
-        zip.file(sheetFile, modifiedSheetXml);
-        cellMapping = mapping;
-        debugLog.log("DRAWING", `  Inserted ${rowsToInsert} rows at row ${gapInfo.gapStartRow} in ${sheetFile}`);
-      }
-    }
-  }
+  // Phase 2: Place each image after the content block it overlaps.
+  // This is per-block placement: images overlapping Block A go after Block A,
+  // images overlapping Block B go after Block B, etc.
+  const movedByContentPush = await placeImagesByBlock(rects, blocks, geom, sheet, zip, sheetFile, cellMapping);
+  debugLog.log("DRAWING", `  placeImagesByBlock: ${movedByContentPush} images placed after their content blocks`);
 
   // Mark which anchors overlap content.
   for (let i = 0; i < rects.length; i++) {
@@ -650,30 +867,26 @@ export async function fixDrawingOverlaps(
     }
   }
 
-  debugLog.log("DRAWING", `fixDrawingOverlaps: ${rects.length} images, contentBoundary=${contentBoundaryY}, overlapsBefore=${stats.overlapsBefore}, contentConflictsBefore=${stats.contentConflictsBefore}`);
+  debugLog.log("DRAWING", `fixDrawingOverlaps: ${rects.length} images, overlapsBefore=${stats.overlapsBefore}, contentConflictsBefore=${stats.contentConflictsBefore}`);
   // Log detailed per-anchor info.
   for (const ai of anchorInfos) {
     debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} overlapsContent=${ai.overlapsContent} overlapsWith=[${ai.overlapsWith.join(",")}]`);
   }
 
-  // Phase 2: Push images that overlap content below the content boundary.
-  // Images are placed in document-flow order below the content, with spacing.
-  const movedByContentPush = pushBelowContentSmart(rects, contentBoundaryY, geom);
-  debugLog.log("DRAWING", `  pushBelowContentSmart: ${movedByContentPush} images pushed below content`);
-
-  // Phase 3: Spread any remaining overlapping images (image↔image).
-  const movedBySpreading = spreadRects(rects);
-  debugLog.log("DRAWING", `  spreadRects: ${movedBySpreading} images spread`);
-
-  // Phase 4: Verify and iteratively resolve any remaining overlaps.
-  // spreadRects processes images top-to-bottom and only checks against
-  // already-placed images. Pushed images may overlap with images not yet
-  // placed. This phase re-checks ALL pairs and pushes conflicting images
-  // down until no overlaps remain.
-  let safetyIteration = 0;
-  while (safetyIteration < 20) {
-    let foundOverlap = false;
-    // Sort by Y so we process top-to-bottom
+  // Phase 3: Resolve any remaining image-image overlaps.
+  // After placeImagesByBlock, some overlaps may remain between:
+  //   - images placed by per-block logic and already-safe images
+  //   - images within the same block that weren't separated
+  //   - test cases without content blocks
+  // Run the safety pass on ALL images to ensure no overlaps remain.
+  const remainingOverlaps = countOverlaps(rects);
+  if (remainingOverlaps > 0) {
+    debugLog.log("DRAWING", `  ${remainingOverlaps} overlaps remain after placement, running safety pass`);
+    spreadRects(rects);
+  }
+  // Final safety pass: push any remaining overlapping images down.
+  const finalOverlapCheck = countOverlaps(rects);
+  if (finalOverlapCheck > 0) {
     const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
     const placed: AnchorRect[] = [];
     for (const r of ordered) {
@@ -684,20 +897,17 @@ export async function fixDrawingOverlaps(
         );
         if (blockers.length === 0) break;
         y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
-        foundOverlap = true;
-        debugLog.log("DRAWING", `  safety: #${r.index} blocked by #${blockers.map(p=>p.index).join(',')} at y=${y}`);
       }
       r.newY1 = y;
       placed.push(r);
     }
-    if (!foundOverlap) break;
-    safetyIteration++;
-    debugLog.log("DRAWING", `  verification pass ${safetyIteration}: resolved remaining overlaps`);
   }
 
   // Phase 5: Count final stats.
   stats.overlapsAfter = countOverlaps(rects);
-  stats.contentConflictsAfter = countContentConflicts(rects, contentBoundaryY);
+  const finalBlocks = findAllContentBlocks(sheet, geom);
+  const finalBoundaryY = finalBlocks.length > 0 ? finalBlocks[finalBlocks.length - 1].endY : contentBoundaryY;
+  stats.contentConflictsAfter = countContentConflicts(rects, finalBoundaryY);
   // Track whether x position changed too (for column A migration).
   stats.imagesRepositioned = rects.filter((r) => r.newY1 !== r.y1 || r.x1 !== (r.x2 - r.w)).length;
   stats.imagesResized = rects.filter((r) => {
@@ -705,9 +915,7 @@ export async function fixDrawingOverlaps(
     const newH = r.h;
     return Math.abs(newW - (r.x2 - r.x1)) > EMU_PER_PX ||
            Math.abs(newH - (r.y2 - r.y1)) > EMU_PER_PX;
-  }).length;
-
-  debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
+  }).length;    debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
 
   // ── Write corrected positions back to the drawing XML ──
   // Uses STRING-based modification on the original XML.
@@ -716,6 +924,20 @@ export async function fixDrawingOverlaps(
   // anchor's <from>/<to> blocks in the original string and replace
   // only the <row>/<rowOff> values.
   if (stats.imagesRepositioned > 0) {
+    // After row insertions, re-read the modified worksheet to get a fresh
+    // geometry that reflects the actual row layout. The original `geom` was
+    // built from the pre-insertion sheet and doesn't account for shifted rows.
+    let writeBackGeom = geom;
+    const modifiedSheetXml = await readEntryText(zip, sheetFile);
+    if (modifiedSheetXml && typeof modifiedSheetXml === "string") {
+      try {
+        const modifiedSheet = parseSheet(modifiedSheetXml, []);
+        writeBackGeom = new DrawingGeometry(modifiedSheet);
+      } catch {
+        // Fall back to original geom if re-parsing fails.
+      }
+    }
+
     // Build position map: each anchor is identified by its embedId + fromRow/col
     // to handle multiple anchors sharing the same r:embed.
     const embedIdToNewPos = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number; fromCol: number; fromColOff: number }>();
@@ -724,10 +946,10 @@ export async function fixDrawingOverlaps(
       if (rect.newY1 === rect.y1 && rect.x1 === originalX1) continue;
       const anchor = allAnchors[rect.index];
       if (!anchor) continue;
-      const fromPos = geom.yToRow(rect.newY1);
+      const fromPos = writeBackGeom.yToRow(rect.newY1);
       const fromRowOff = Math.max(0, Math.round(fromPos.off));
       const newY2 = rect.newY1 + rect.h;
-      const toPos = geom.yToRow(newY2);
+      const toPos = writeBackGeom.yToRow(newY2);
       const toRowOff = Math.max(0, Math.round(toPos.off));
       // Use embedId + original row as unique key to handle multiple anchors
       // sharing the same r:embed.
@@ -1106,7 +1328,10 @@ function updateAnchorsString(
       // Find embed ID and from-row within this anchor block.
       const blockStr = originalXml.substring(anchorOpen, anchorClose + closeTag.length);
       const embedMatch = blockStr.match(/r:embed="([^"]+)"/);
-      const fromRowMatch = blockStr.match(/<xdr:row>(\d+)<\/xdr:row>/);
+      // Use detected prefix to match the row element correctly.
+      const rowTag = tag("row");
+      const rowRegex = new RegExp(`<${rowTag}>(\\d+)<\/${rowTag}>`);
+      const fromRowMatch = blockStr.match(rowRegex);
       if (embedMatch && fromRowMatch) {
         // Build unique key: embedId@rROW to handle multiple anchors sharing r:embed
         const key = `${embedMatch[1]}@r${fromRowMatch[1]}`;
@@ -1291,7 +1516,7 @@ function updateAnchorsString(
 class DrawingGeometry {
   private sheet: ParsedSheet;
   private defaultColWidth: number;
-  private defaultRowHeight: number;
+  public defaultRowHeight: number;
 
   constructor(sheet: ParsedSheet) {
     this.sheet = sheet;

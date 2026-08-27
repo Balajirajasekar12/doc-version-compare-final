@@ -505,7 +505,7 @@ describe("EO Image Overlap Repositioning E2E", () => {
     expect(afterRects.length).toBe(beforeRects.length);
     // Both images overlap content (rows 2 and 4 are within content rows 0-9)
     // so both should be pushed below content (row 10+)
-    expect(afterRects[0].fromRow).toBeGreaterThan(10);
+    expect(afterRects[0].fromRow).toBeGreaterThanOrEqual(10);
     // Image 2 should be below Image 1 (document-flow order)
     expect(afterRects[1].fromRow).toBeGreaterThan(afterRects[0].fromRow);
     // No overlaps

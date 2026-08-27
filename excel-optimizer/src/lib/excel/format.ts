@@ -310,6 +310,25 @@ export function formatSheet(
     }
   }
 
+  /* --------------- typo corrections for data cells ---------- */
+  // Apply typo/spelling corrections to ALL string cells (not just headings).
+  // This fixes common misspellings like "pupose" → "purpose".
+  if (settings.correctTypos) {
+    for (const [row, cells] of sheet.cells) {
+      for (const cell of cells.values()) {
+        if (cell.kind !== "string" || cell.hasFormula) continue;
+        const text = cell.text ?? "";
+        if (!text) continue;
+        const corrected = correctTypos(text);
+        if (corrected !== text) {
+          if (setCellText(sheet, cell.row, cell.col, corrected)) {
+            dirty = true;
+          }
+        }
+      }
+    }
+  }
+
   return dirty;
 }
 

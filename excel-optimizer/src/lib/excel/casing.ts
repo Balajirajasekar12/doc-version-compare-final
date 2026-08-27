@@ -84,6 +84,8 @@ const TYPO_CORRECTIONS: Array<{ pattern: RegExp; replacement: string }> = [
   { pattern: /\bll+package\b/gi, replacement: "Bill Package" },
   // "billpackage" → "Bill Package" (no space)
   { pattern: /\bbill\s*package\b/gi, replacement: "Bill Package" },
+  // "pupose" → "purpose" (common typo — missing 'r')
+  { pattern: /\bpupose\b/gi, replacement: "purpose" },
 ];
 
 /**

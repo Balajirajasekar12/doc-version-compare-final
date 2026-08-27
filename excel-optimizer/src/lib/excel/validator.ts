@@ -466,6 +466,9 @@ function isTypoCorrectionChange(before: string, after: string): boolean {
   const a = after.slice(2);
   if (b === a) return false;
   const corrected = correctTypos(b);
+  // Data cells only get correctTypos (no title case).
+  if (corrected === a) return true;
+  // Heading cells get correctTypos + toTitleCase.
   const result = toTitleCase(corrected);
   return result === a;
 }
