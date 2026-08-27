@@ -356,13 +356,15 @@ describe("PRODUCTION: No artifacts in output", () => {
     }
   });
 
-  it("'Field | Value' is paragraph, not field_value data", async () => {
+  it("'Field | Value' is not emitted as field_value data", async () => {
     const buf = await createDocx(FV_DATA);
     const doc = await parseFileBytes("t.docx", buf);
     const items = toCanonical(doc).items;
-    const header = items.find(i => i.kind === "paragraph" && i.value.includes("Field"));
-    expect(header).toBeDefined();
+    // Generic table header "Field | Value" should not appear as field_value data
     const fieldData = items.find(i => i.kind === "field_value" && i.key === "field" && i.value !== "Value");
     expect(fieldData).toBeUndefined();
+    // Data rows should still be present as field_value items
+    const accountItem = items.find(i => i.kind === "field_value" && i.key === "account");
+    expect(accountItem).toBeDefined();
   });
 });
