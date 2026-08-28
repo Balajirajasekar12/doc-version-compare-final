@@ -29,8 +29,23 @@ export interface SheetData {
  * Extracted content. `text` documents (docx/rtf/pdf) become a list of lines;
  * spreadsheet documents (xlsx/xls/csv) become a grid of cells per sheet.
  */
+/**
+ * Structured table grid — real 2D cell structure preserved by parsers.
+ * PDF, DOCX, and RTF parsers emit this alongside flattened text lines
+ * so the canonical layer can do structural comparison instead of
+ * regex guessing.
+ */
+export interface TableGrid {
+  /** Optional header row (detected by the parser). */
+  headerRow?: string[];
+  /** Data rows, each an array of cell strings. */
+  rows: string[][];
+  /** Where this table came from (for reporting only). */
+  sourceLocation: string;
+}
+
 export type ParsedContent =
-  | { type: "text"; lines: string[] }
+  | { type: "text"; lines: string[]; tables?: TableGrid[] }
   | { type: "sheet"; sheets: SheetData[] };
 
 export interface ParsedDoc {

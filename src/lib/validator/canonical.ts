@@ -14,7 +14,7 @@
  * Comparison happens on the canonical model, not on raw format output.
  */
 
-import type { ComparisonMode, DiffRecord, DiffType, ParsedDoc } from "./types";
+import type { ComparisonMode, DiffRecord, DiffType, ParsedDoc, TableGrid } from "./types";
 
 // ── Canonical Content Types ─────────────────────────────────────────────────
 
@@ -543,6 +543,94 @@ function filterArtifactLines(lines: string[]): string[] {
   });
 }
 
+/**
+ * Detect tab-separated or pipe-separated table blocks from text lines.
+ * Handles empty lines between table rows (common in RTF output).
+ * Returns TableGrid[] for structural comparison.
+ */
+interface TableBlockResult {
+  tables: TableGrid[];
+  /** Line indices belonging to detected tables */
+  tableLineIndices: Set<number>;
+}
+
+function extractTablesFromLines(lines: string[]): TableBlockResult {
+  const tables: TableGrid[] = [];
+  const tableLineIndices = new Set<number>();
+
+  // Identify table-line indices
+  const rawIndices = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.includes("|")) {
+      const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
+      if (parts.length >= 2 && !parts[0].includes(":")) {
+        rawIndices.add(i);
+      }
+    } else if (trimmed.includes("\t")) {
+      const parts = trimmed.split("\t").map(p => p.trim()).filter(p => p !== "");
+      if (parts.length >= 2 && !parts[0].includes(":")) {
+        rawIndices.add(i);
+      }
+    }
+  }
+
+  if (rawIndices.size === 0) return { tables, tableLineIndices };
+
+  // Group table lines, allowing empty lines between rows
+  const sortedIndices = Array.from(rawIndices).sort((a, b) => a - b);
+  let currentRows: string[][] = [];
+  let currentLineIndices: number[] = [];
+  let currentStart = sortedIndices[0];
+  let lastIdx = sortedIndices[0];
+
+  function parseRow(idx: number): string[] {
+    const trimmed = lines[idx].trim();
+    const cells = trimmed.includes("|")
+      ? trimmed.split("|").map(c => c.trim())
+      : trimmed.split("\t").map(c => c.trim());
+    const filteredCells = cells.filter(c => c !== "");
+    return filteredCells.length >= 2 ? filteredCells : cells;
+  }
+
+  for (const idx of sortedIndices) {
+    const gap = idx - lastIdx;
+    const row = parseRow(idx);
+
+    if (gap <= 3 && (currentRows.length > 0 || gap <= 1)) {
+      // Continue current table (allow gap of 1-3 lines between rows)
+      currentRows.push(row);
+      currentLineIndices.push(idx);
+    } else {
+      // Flush current table and start new one
+      if (currentRows.length >= 2) {
+        tables.push({
+          headerRow: undefined,
+          rows: currentRows,
+          sourceLocation: `Lines ${currentStart + 1}-${lastIdx + 1}`,
+        });
+        for (const li of currentLineIndices) tableLineIndices.add(li);
+      }
+      currentRows = [row];
+      currentLineIndices = [idx];
+      currentStart = idx;
+    }
+    lastIdx = idx;
+  }
+
+  // Flush final table
+  if (currentRows.length >= 2) {
+    tables.push({
+      headerRow: undefined,
+      rows: currentRows,
+      sourceLocation: `Lines ${currentStart + 1}-${lastIdx + 1}`,
+    });
+    for (const li of currentLineIndices) tableLineIndices.add(li);
+  }
+
+  return { tables, tableLineIndices };
+}
+
 function textToCanonical(doc: ParsedDoc): ContentItem[] {
   const rawLines = doc.content?.type === "text" ? doc.content.lines : [];
   const filtered = filterArtifactLines(rawLines);
@@ -550,21 +638,19 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
 
   const items: ContentItem[] = [];
 
-  // First pass: detect pipe-delimited AND tab-delimited table blocks.
-  // RTF \cell produces tab-separated rows; PDF extraction may produce
-  // pipe-separated rows. Both must be recognized as table data.
+  // Detect tables using gap-tolerant grouping
+  const { tables, tableLineIndices: tableLineSet } = extractTablesFromLines(lines);
+
+  // Also use the old consecutive-block detection for pipe tables without gaps
   const tableLineIndices = new Set<number>();
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
-    // Check for pipe-delimited
     if (trimmed.includes("|")) {
       const parts = trimmed.split("|").map(p => p.trim()).filter(p => p !== "");
       if (parts.length >= 2 && !parts[0].includes(":")) {
         tableLineIndices.add(i);
       }
-    }
-    // Check for tab-delimited (from RTF \cell, PDF column extraction)
-    else if (trimmed.includes("\t")) {
+    } else if (trimmed.includes("\t")) {
       const parts = trimmed.split("\t").map(p => p.trim()).filter(p => p !== "");
       if (parts.length >= 2 && !parts[0].includes(":")) {
         tableLineIndices.add(i);
@@ -572,16 +658,15 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     }
   }
 
-  // Group consecutive table lines
+  // Build table blocks from consecutive table lines (legacy path for pipe tables)
   const tableBlocks: Array<{ start: number; end: number; rows: string[][] }> = [];
   let currentBlock: { start: number; end: number; rows: string[][] } | null = null;
   for (let i = 0; i < lines.length; i++) {
-    if (tableLineIndices.has(i)) {
+    if (tableLineIndices.has(i) && !tableLineSet.has(i)) {
       const trimmed = lines[i].trim();
       const cells = trimmed.includes("|")
         ? trimmed.split("|").map(c => c.trim())
         : trimmed.split("\t").map(c => c.trim());
-      // For tab-separated rows, filter empty cells to handle sparse tables
       const filteredCells = cells.filter(c => c !== "");
       const rowCells = filteredCells.length >= 2 ? filteredCells : cells;
       if (!currentBlock) {
@@ -596,12 +681,116 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
   }
   if (currentBlock) tableBlocks.push(currentBlock);
 
-  const tableLineSet = new Set<number>();
   for (const block of tableBlocks) {
     for (let i = block.start; i <= block.end; i++) tableLineSet.add(i);
   }
 
-  // Process table blocks
+  // Process gap-tolerant tables (RTF with empty lines between rows)
+  for (const table of tables) {
+    const firstRow = table.rows[0];
+    // Detect header: all-alpha short cells, 2+ rows
+    const is2ColHeader = table.rows.length >= 2 &&
+      firstRow.length === 2 &&
+      firstRow.every(c => c.length <= 10 && /^[A-Za-z][A-Za-z ]*$/.test(c));
+    const isMultiColHeader = table.rows.length >= 2 &&
+      firstRow.length > 2 &&
+      firstRow.every(c => c.length <= 35 && /^[A-Za-z][A-Za-z0-9 /-]*$/.test(c));
+    const isHeader = (is2ColHeader || isMultiColHeader);
+    const startRow = isHeader ? 1 : 0;
+
+    if (isHeader) {
+      const headerText = firstRow.join(" ").toLowerCase();
+      const isGenericHeader = /^(field|column|name|label|header|key)( (field|column|name|label|header|key|value|data))?$/i.test(headerText);
+      if (!isGenericHeader) {
+        items.push({
+          key: normalizeKey(firstRow.join(" ")),
+          label: firstRow.join(" | "),
+          value: firstRow.join(" | "),
+          kind: "paragraph",
+          sourceLocation: table.sourceLocation,
+        });
+      }
+    }
+
+    // Tab-delimited 2-col transposition — ONLY for tab-separated tables
+    // (pipe-delimited tables already have correct row-wise pairing)
+    const isTabTable = lines.slice(
+      parseInt(table.sourceLocation.match(/Lines (\d+)/)?.[1] || "0") - 1,
+      parseInt(table.sourceLocation.match(/-?(\d+)/)?.[1] || "0")
+    ).some(l => l.includes("\t"));
+    const isTab2ColHeader = isTabTable && firstRow.length === 2 &&
+      firstRow.every(c => /^[A-Za-z][A-Za-z ]+$/.test(c));
+    const headerText = firstRow.join(" ").toLowerCase();
+    const isGenericTabHeader = /^(field|column|name|label|header|key)( (field|column|name|label|header|key|value|data))?$/i.test(headerText);
+
+    if (isTab2ColHeader && !isGenericTabHeader && table.rows.length >= 2) {
+      // TRANSPOSE: pair each header label with the first data row's cell
+      const firstDataRow = table.rows[1];
+      if (firstDataRow) {
+        for (let c = 0; c < Math.min(2, firstRow.length, firstDataRow.length); c++) {
+          const fieldName = firstRow[c]?.trim();
+          const fieldValue = firstDataRow[c]?.trim();
+          if (fieldName && fieldValue && fieldName !== "" && fieldValue !== "") {
+            items.push({
+              key: normalizeKey(fieldName),
+              label: fieldName,
+              value: fieldValue,
+              kind: "field_value",
+              sourceLocation: `${table.sourceLocation} col ${c + 1}`,
+            });
+          }
+        }
+      }
+      // Emit additional data rows as paragraphs
+      for (let r = 2; r < table.rows.length; r++) {
+        const row = table.rows[r];
+        for (let c = 0; c < row.length; c++) {
+          const cell = row[c]?.trim();
+          if (cell && cell !== "") {
+            items.push({
+              key: `para_${items.length}`,
+              label: cell,
+              value: cell,
+              kind: "paragraph",
+              sourceLocation: `${table.sourceLocation} row ${r + 1} col ${c + 1}`,
+            });
+          }
+        }
+      }
+    } else {
+      // Default: data rows become field_value items
+      for (let r = startRow; r < table.rows.length; r++) {
+        const row = table.rows[r];
+        if (row.length >= 2) {
+          const field = row[0].trim();
+          const value = row[1].trim();
+          if (field !== "" && value !== "") {
+            items.push({
+              key: normalizeKey(field),
+              label: field,
+              value,
+              kind: "field_value",
+              sourceLocation: `${table.sourceLocation} row ${r + 1}`,
+            });
+          }
+          for (let c = 2; c < row.length; c++) {
+            const extra = row[c].trim();
+            if (extra !== "") {
+              items.push({
+                key: `para_${items.length}`,
+                label: extra,
+                value: extra,
+                kind: "paragraph",
+                sourceLocation: `${table.sourceLocation} row ${r + 1} col ${c + 1}`,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Process legacy consecutive-block tables (pipe tables without gaps)
   for (const block of tableBlocks) {
     const firstRow = block.rows[0];
     // Only treat as header if there are at least 2 rows
