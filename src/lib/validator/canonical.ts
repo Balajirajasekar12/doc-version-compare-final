@@ -1227,10 +1227,24 @@ export function compareCanonical(
       }
     }
     if (bestMatch) {
+      let isIdentical = valuesEqual(bEl.value, bestMatch.el.value);
+
+      // Structural artifact check: when the comparing value is a LABEL
+      // (e.g. "Client Name") that appears as a KEY in the baseline format,
+      // the pairing is a 2-column layout artifact, not a real difference.
+      // Treat as identical to avoid false VALUE_MISMATCH reports.
+      if (!isIdentical) {
+        const compValKey = normalizeKey(bestMatch.el.value);
+        const baselineHasKey = baseline.items.some(
+          (other, oi) => oi !== bIdx && other.key === compValKey && other.kind === "field_value"
+        );
+        if (baselineHasKey) isIdentical = true;
+      }
+
       matched.push({
         baseline: bEl,
         comparing: bestMatch.el,
-        identical: valuesEqual(bEl.value, bestMatch.el.value),
+        identical: isIdentical,
       });
       unmatchedBaseline.delete(bIdx);
       unmatchedComparing.delete(bestMatch.i);
@@ -2256,6 +2270,73 @@ export function compareCanonical(
         });
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(bestMatch.idx);
+      }
+    }
+  }
+
+  // Phase 9: Structural reconciliation for2-column layout artifacts.
+  // When one format flattens a 2-column layout into linear lines,
+  // normalizeCellLines may pair a label (e.g. "Client Number") with the
+  // NEXT label ("Client Name") instead of the correct value ("016543").
+  // This produces fv("client number", "Client Name") — a field_value
+  // whose VALUE is actually a KEY in the other format.
+  // Detect these and match them as structural (identical) differences.
+  const unmatchedKVBase9 = Array.from(unmatchedBaseline)
+    .filter(i => baseline.items[i].kind === "field_value");
+  const unmatchedKVComp9 = Array.from(unmatchedComparing)
+    .filter(i => comparing.items[i].kind === "field_value");
+
+  // Build key sets for fast lookup
+  const baselineKeys = new Set(unmatchedKVBase9.map(i => baseline.items[i].key));
+  const comparingKeys = new Set(unmatchedKVComp9.map(i => comparing.items[i].key));
+  // Also include paragraph values as potential keys (labels emitted as paragraphs)
+  for (const i of unmatchedBaseline) {
+    const el = baseline.items[i];
+    if (el.kind === "paragraph" || el.kind === "list_item") {
+      baselineKeys.add(normalizeKey(el.value));
+    }
+  }
+  for (const i of unmatchedComparing) {
+    const el = comparing.items[i];
+    if (el.kind === "paragraph" || el.kind === "list_item") {
+      comparingKeys.add(normalizeKey(el.value));
+    }
+  }
+
+  // Check unmatched baseline field_values: is the VALUE a KEY in comparing?
+  for (const bIdx of unmatchedKVBase9) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const bEl = baseline.items[bIdx];
+    const valKey = normalizeKey(bEl.value);
+    if (comparingKeys.has(valKey) && valKey !== bEl.key) {
+      // The baseline value is a key in comparing — structural artifact.
+      // Find the comparing item with this key and match.
+      for (const cIdx of unmatchedComparing) {
+        const cEl = comparing.items[cIdx];
+        if (cEl.key === valKey || (cEl.kind !== "field_value" && normalizeKey(cEl.value) === valKey)) {
+          matched.push({ baseline: bEl, comparing: cEl, identical: true });
+          unmatchedBaseline.delete(bIdx);
+          unmatchedComparing.delete(cIdx);
+          break;
+        }
+      }
+    }
+  }
+
+  // Check unmatched comparing field_values: is the VALUE a KEY in baseline?
+  for (const cIdx of unmatchedKVComp9) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const cEl = comparing.items[cIdx];
+    const valKey = normalizeKey(cEl.value);
+    if (baselineKeys.has(valKey) && valKey !== cEl.key) {
+      for (const bIdx of unmatchedBaseline) {
+        const bEl = baseline.items[bIdx];
+        if (bEl.key === valKey || (bEl.kind !== "field_value" && normalizeKey(bEl.value) === valKey)) {
+          matched.push({ baseline: bEl, comparing: cEl, identical: true });
+          unmatchedComparing.delete(cIdx);
+          unmatchedBaseline.delete(bIdx);
+          break;
+        }
       }
     }
   }
