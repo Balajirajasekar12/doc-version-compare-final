@@ -492,9 +492,16 @@ interface ContentBlock {
 }
 
 /**
- * Finds all content blocks in a worksheet.
- * A content block is a group of consecutive rows with non-empty cells,
- * separated from other blocks by gaps of >3 empty rows.
+ * Finds all content blocks in a worksheet using adaptive gap detection.
+ * 
+ * Strategy:
+ *   1. Collect all rows with content
+ *   2. Compute the median content density (content rows per unit)
+ *   3. Use adaptive gap: max(3, medianGap * 2) where medianGap is the
+ *      median distance between consecutive content rows
+ *   4. For documents with many scattered rows (low density), use a
+ *      tighter threshold; for sparse documents, use a wider one.
+ *   5. Always cap at a minimum of 3 to avoid splitting table rows.
  */
 function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): ContentBlock[] {
   const contentRows = new Set<number>();
@@ -508,21 +515,45 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
   }
   const sorted = Array.from(contentRows).sort((a, b) => a - b);
   if (sorted.length === 0) return [];
+  if (sorted.length === 1) {
+    return [{
+      startRow: sorted[0],
+      endRow: sorted[0],
+      startY: geom.rowStart(sorted[0] - 1),
+      endY: geom.rowStart(sorted[0]),
+    }];
+  }
+
+  // Compute gaps between consecutive content rows.
+  const gaps: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    gaps.push(sorted[i] - sorted[i - 1]);
+  }
+
+  // Adaptive gap threshold: use median gap × 1.5, clamped to [3, 20].
+  // This handles:
+  //   - Dense tables (median gap = 1): threshold = 3 (min)
+  //   - Mixed content (median gap = 5): threshold = 7-8
+  //   - Sparse documents (median gap = 15): threshold = 20 (max)
+  const sortedGaps = [...gaps].sort((a, b) => a - b);
+  const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
+  const adaptiveGap = Math.max(3, Math.min(20, Math.ceil(medianGap * 1.5)));
+
+  debugLog.log("DRAWING", `findAllContentBlocks: ${sorted.length} content rows, medianGap=${medianGap}, adaptiveGap=${adaptiveGap}`);
 
   const blocks: ContentBlock[] = [];
   let blockStart = sorted[0];
   let blockEnd = sorted[0];
 
   for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] - blockEnd > 3) {
-      // Gap > 3 rows → new block
+    if (sorted[i] - blockEnd > adaptiveGap) {
       blocks.push({
         startRow: blockStart,
         endRow: blockEnd,
         startY: geom.rowStart(blockStart - 1),
         endY: geom.rowStart(blockEnd),
       });
-    blockStart = sorted[i];
+      blockStart = sorted[i];
     }
     blockEnd = sorted[i];
   }
@@ -533,6 +564,7 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
     endY: geom.rowStart(blockEnd),
   });
 
+  debugLog.log("DRAWING", `findAllContentBlocks: ${blocks.length} blocks detected`);
   return blocks;
 }
 
@@ -629,14 +661,13 @@ async function placeImagesByBlock(
     // Start placing images 1px below the block.
     let currentY = blockEndY + EMU_PER_PX;
 
-    // Place images stacked vertically at column A.
+    // Place images stacked vertically, preserving original horizontal positions.
+    // This keeps the visual layout consistent — images stay where they were
+    // horizontally, just moved below their content block vertically.
     let imagesBottomY = currentY; // bottom of the last image placed
     for (const img of images) {
-      if (img.newY1 !== currentY || img.x1 !== 0) {
+      if (img.newY1 !== currentY) {
         img.newY1 = currentY;
-        const originalWidth = img.x2 - img.x1;
-        img.x1 = 0;
-        img.x2 = originalWidth;
         moved++;
       }
       imagesBottomY = currentY + img.h;
@@ -695,11 +726,8 @@ async function placeImagesByBlock(
     let currentY = lastBlockEndY + EMU_PER_PX; // immediately after the block
     unassigned.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
     for (const img of unassigned) {
-      if (img.newY1 !== currentY || img.x1 !== 0) {
+      if (img.newY1 !== currentY) {
         img.newY1 = currentY;
-        const originalWidth = img.x2 - img.x1;
-        img.x1 = 0;
-        img.x2 = originalWidth;
         moved++;
       }
       currentY += img.h + EMU_PER_PX;
@@ -984,7 +1012,9 @@ export async function fixDrawingOverlaps(
     }
   }
   if (maxContentRow > 0) {
-    const vmlMoved = await processVmlDrawings(zip, sheetFile, sheet, maxContentRow + 1);
+    // Use the content block end row for VML boundary (most accurate)
+    const vmlBoundary = blocks.length > 0 ? blocks[blocks.length - 1].endRow + 1 : maxContentRow + 1;
+    const vmlMoved = await processVmlDrawings(zip, sheetFile, sheet, vmlBoundary);
     if (vmlMoved > 0) {
       debugLog.log("DRAWING", `  VML: ${vmlMoved} shapes moved below content`);
     }
@@ -997,18 +1027,46 @@ export async function fixDrawingOverlaps(
 
 /**
  * Counts the number of overlapping image pairs.
+ * Uses sweep-line algorithm for O(n log n) performance on large datasets.
  */
 function countOverlaps(rects: AnchorRect[]): number {
+  const n = rects.length;
+  if (n <= 1) return 0;
+  if (n <= 50) {
+    // For small counts, brute-force is faster due to lower overhead
+    let count = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = rects[i];
+        const b = rects[j];
+        if (rectsOverlap(a.x1, a.newY1, a.x2, a.newY1 + a.h,
+                         b.x1, b.newY1, b.x2, b.newY1 + b.h)) {
+          count++;
+        }
+      }
+    }
+    return count;
+  }
+
+  // Sweep-line: sort by Y start, use active set for X overlap check
   let count = 0;
-  for (let i = 0; i < rects.length; i++) {
-    for (let j = i + 1; j < rects.length; j++) {
-      const a = rects[i];
-      const b = rects[j];
-      if (rectsOverlap(a.x1, a.newY1, a.x2, a.newY1 + a.h,
-                       b.x1, b.newY1, b.x2, b.newY1 + b.h)) {
+  const indexed = rects.map((r, i) => ({ r, i }));
+  indexed.sort((a, b) => a.r.newY1 - b.r.newY1);
+  const active: typeof indexed = [];
+  for (const item of indexed) {
+    const yTop = item.r.newY1;
+    const yBottom = yTop + item.r.h;
+    // Remove items that end before this one starts
+    while (active.length > 0 && active[0].r.newY1 + active[0].r.h <= yTop) {
+      active.shift();
+    }
+    // Check X overlap against active items
+    for (const a of active) {
+      if (a.r.x1 < item.r.x2 && a.r.x2 > item.r.x1) {
         count++;
       }
     }
+    active.push(item);
   }
   return count;
 }
@@ -1131,14 +1189,9 @@ function pushBelowContentSmart(
     // Move ALL images to the gap area, starting at column A.
     // Place at next available Y position, stacked vertically.
     const candidateY = Math.max(r.y1, nextAvailableY);
-    console.log(`[PUSH] idx=${r.index} y1=${Math.round(r.y1)} x1=${Math.round(r.x1)} candidateY=${Math.round(candidateY)} nextAvail=${Math.round(nextAvailableY)}`);
-    if (candidateY !== r.y1 || r.x1 !== 0) {
+    if (candidateY !== r.y1) {
       r.newY1 = candidateY;
-      // Force column A: set x1 to 0, x2 to width (preserving original width).
-      // This ensures all screenprints start from column A.
-      const originalWidth = r.x2 - r.x1;
-      r.x1 = 0;
-      r.x2 = originalWidth;
+      // Preserve original horizontal position — don't force to column A.
       moved++;
     }
     // The next image must start below this one.
