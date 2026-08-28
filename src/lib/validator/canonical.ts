@@ -616,7 +616,7 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
     const isMultiColHeader = block.rows.length >= 2 &&
       firstRow && firstRow.length > 2 &&
       firstRow.every(c => c.length <= 35 && /^[A-Za-z][A-Za-z0-9 /-]*$/.test(c));
-    const isHeader = is2ColHeader || isMultiColHeader;
+    const isHeader = (is2ColHeader || isMultiColHeader) && block.rows.length >= 2;
     const startRow = isHeader ? 1 : 0;
 
     // Header becomes a paragraph (not data), but skip generic table headers
@@ -635,35 +635,87 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
       }
     }
 
-    // Data rows become field_value items
-    // For multi-column rows (3+ columns), emit ALL columns as separate items
-    // so content is preserved for cross-format comparison.
-    for (let r = startRow; r < block.rows.length; r++) {
-      const row = block.rows[r];
-      if (row.length >= 2) {
-        const field = row[0].trim();
-        const value = row[1].trim();
-        if (field !== "" && value !== "") {
-          items.push({
-            key: normalizeKey(field),
-            label: field,
-            value,
-            kind: "field_value",
-            sourceLocation: `Line ${block.start + 1 + r}`,
-          });
+    // ── Tab-delimited 2-col header detection ──
+    // RTF \cell produces rows like:
+    //   Client Number\tClient Name
+    //   016543\tBorough Of Ridgway
+    // Each row has cells from BOTH columns. The correct pairing is COLUMN-wise:
+    //   Col 0: Client Number → 016543
+    //   Col 1: Client Name → Borough Of Ridgway
+    // Pipe-delimited tables from PDF already have correct row-wise pairing.
+    const isTabBlock = lines.slice(block.start, block.end + 1).some(l => l.includes("\t"));
+
+    // Tab-delimited 2-col transposition: detect by ALL-ALPHA first row + tabs
+    // (independent of the pipe-delimited is2ColHeader which requires length≤10)
+    const isTab2ColHeader = isTabBlock && block.rows.length >= 2 &&
+      firstRow && firstRow.length === 2 &&
+      firstRow.every(c => /^[A-Za-z][A-Za-z ]+$/.test(c));
+
+    // Skip transposition for generic headers like "Field | Value"
+    const headerText = firstRow.join(" ").toLowerCase();
+    const isGenericTabHeader = /^(field|column|name|label|header|key)( (field|column|name|label|header|key|value|data))?$/i.test(headerText);
+
+    if (isTab2ColHeader && !isGenericTabHeader) {
+      // TRANSPOSE: pair each header label with the first data row's cell
+      const firstDataRow = block.rows[1];
+      if (firstDataRow) {
+        for (let c = 0; c < Math.min(2, firstRow.length, firstDataRow.length); c++) {
+          const fieldName = firstRow[c]?.trim();
+          const fieldValue = firstDataRow[c]?.trim();
+          if (fieldName && fieldValue && fieldName !== "" && fieldValue !== "") {
+            items.push({
+              key: normalizeKey(fieldName),
+              label: fieldName,
+              value: fieldValue,
+              kind: "field_value",
+              sourceLocation: `Line ${block.start + 2} col ${c + 1}`,
+            });
+          }
         }
-        // Emit additional columns (3+) as paragraph items
-        // so they can be matched against separate lines in other formats
-        for (let c = 2; c < row.length; c++) {
-          const extra = row[c].trim();
-          if (extra !== "") {
+      }
+      // Emit additional data rows (row 2+) as paragraphs
+      for (let r = 2; r < block.rows.length; r++) {
+        const row = block.rows[r];
+        for (let c = 0; c < row.length; c++) {
+          const cell = row[c]?.trim();
+          if (cell && cell !== "") {
             items.push({
               key: `para_${items.length}`,
-              label: extra,
-              value: extra,
+              label: cell,
+              value: cell,
               kind: "paragraph",
               sourceLocation: `Line ${block.start + 1 + r} col ${c + 1}`,
             });
+          }
+        }
+      }
+    } else {
+      // Default: data rows become field_value items
+      for (let r = startRow; r < block.rows.length; r++) {
+        const row = block.rows[r];
+        if (row.length >= 2) {
+          const field = row[0].trim();
+          const value = row[1].trim();
+          if (field !== "" && value !== "") {
+            items.push({
+              key: normalizeKey(field),
+              label: field,
+              value,
+              kind: "field_value",
+              sourceLocation: `Line ${block.start + 1 + r}`,
+            });
+          }
+          for (let c = 2; c < row.length; c++) {
+            const extra = row[c].trim();
+            if (extra !== "") {
+              items.push({
+                key: `para_${items.length}`,
+                label: extra,
+                value: extra,
+                kind: "paragraph",
+                sourceLocation: `Line ${block.start + 1 + r} col ${c + 1}`,
+              });
+            }
           }
         }
       }
@@ -1026,6 +1078,281 @@ export function compareCanonical(
         unmatchedComparing.delete(cIdx);
         usedComp.add(cIdx);
         break;
+      }
+    }
+  }
+
+  // Phase 2a: Split pipe-delimited paragraphs and match against individual items.
+  // When PDF has paragraph("Group | Total") and RTF has paragraph("Group") +
+  // paragraph("Total"), the pipe-delimited paragraph should match both.
+  const unmatchedParaBase2a = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => (el.kind === "paragraph" || el.kind === "list_item") && el.value.includes("|"));
+  for (const { el: bEl, idx: bIdx } of unmatchedParaBase2a) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    const parts = bEl.value.split("|").map(p => p.trim()).filter(p => p !== "");
+    if (parts.length < 2) continue;
+    // Try to match ALL parts against separate comparing paragraphs
+    const matchedParts: number[] = [];
+    for (const part of parts) {
+      const partNorm = normalizeValue(part, mode).toLowerCase();
+      for (const cIdx of unmatchedComparing) {
+        const cEl = comparing.items[cIdx];
+        if (cEl.kind !== "paragraph" && cEl.kind !== "list_item") continue;
+        const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+        if (valuesEqual(partNorm, cNorm) && !matchedParts.includes(cIdx)) {
+          matchedParts.push(cIdx);
+          break;
+        }
+      }
+    }
+    if (matchedParts.length === parts.length) {
+      // ALL parts matched — consume the baseline paragraph and all matched comparing items
+      unmatchedBaseline.delete(bIdx);
+      for (const cIdx of matchedParts) {
+        matched.push({ baseline: bEl, comparing: comparing.items[cIdx], identical: true });
+        unmatchedComparing.delete(cIdx);
+      }
+    }
+  }
+
+  // Same in reverse: split pipe-delimited paragraphs in comparing against baseline
+  const unmatchedParaComp2a = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => (el.kind === "paragraph" || el.kind === "list_item") && el.value.includes("|"));
+  for (const { el: cEl, idx: cIdx } of unmatchedParaComp2a) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const parts = cEl.value.split("|").map(p => p.trim()).filter(p => p !== "");
+    if (parts.length < 2) continue;
+    const matchedParts: number[] = [];
+    for (const part of parts) {
+      const partNorm = normalizeValue(part, mode).toLowerCase();
+      for (const bIdx of unmatchedBaseline) {
+        const bEl = baseline.items[bIdx];
+        if (bEl.kind !== "paragraph" && bEl.kind !== "list_item") continue;
+        const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+        if (valuesEqual(partNorm, bNorm) && !matchedParts.includes(bIdx)) {
+          matchedParts.push(bIdx);
+          break;
+        }
+      }
+    }
+    if (matchedParts.length === parts.length) {
+      unmatchedComparing.delete(cIdx);
+      for (const bIdx of matchedParts) {
+        matched.push({ baseline: baseline.items[bIdx], comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+      }
+    }
+  }
+
+  // Phase 2a-extra: Split unmatched field_value items for cross-format matching.
+  // Handles two cases:
+  // A) field_value("A", "B") ↔ paragraph("A") + paragraph("B")
+  // B) field_value("A B", "C") ↔ paragraph("A") + paragraph("B") + paragraph("C")
+  //    (PDF merges cells with spaces)
+  const unmatchedKVBaseSplit = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value");
+  for (const { el: bEl, idx: bIdx } of unmatchedKVBaseSplit) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    // First try: match key + value as separate whole paragraphs
+    const keyNorm = normalizeValue(bEl.label, mode).toLowerCase();
+    const valNorm = normalizeValue(bEl.value, mode).toLowerCase();
+    let keyMatched = -1;
+    let valMatched = -1;
+    for (const cIdx of unmatchedComparing) {
+      const cEl = comparing.items[cIdx];
+      if (cEl.kind !== "paragraph" && cEl.kind !== "list_item") continue;
+      const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+      if (keyMatched === -1 && valuesEqual(keyNorm, cNorm)) {
+        keyMatched = cIdx;
+      } else if (valMatched === -1 && valuesEqual(valNorm, cNorm)) {
+        valMatched = cIdx;
+      }
+    }
+    if (keyMatched !== -1 && valMatched !== -1 && keyMatched !== valMatched) {
+      matched.push({ baseline: bEl, comparing: comparing.items[keyMatched], identical: true });
+      matched.push({ baseline: bEl, comparing: comparing.items[valMatched], identical: true });
+      unmatchedBaseline.delete(bIdx);
+      unmatchedComparing.delete(keyMatched);
+      unmatchedComparing.delete(valMatched);
+      continue;
+    }
+    // Second try: split key by spaces and match each word + value against paragraphs
+    const keyTokens = bEl.label.trim().split(/\s+/).filter(t => t.length > 0);
+    if (keyTokens.length < 2) continue;
+    const allTokens = [...keyTokens, bEl.value.trim()];
+    const usedC = new Set<number>();
+    let allMatched = true;
+    for (const token of allTokens) {
+      const tokenNorm = normalizeValue(token, mode).toLowerCase();
+      let found = false;
+      for (const cIdx of unmatchedComparing) {
+        if (usedC.has(cIdx)) continue;
+        const cEl = comparing.items[cIdx];
+        if (cEl.kind !== "paragraph" && cEl.kind !== "list_item") continue;
+        const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+        if (valuesEqual(tokenNorm, cNorm)) {
+          usedC.add(cIdx);
+          found = true;
+          break;
+        }
+      }
+      if (!found) { allMatched = false; break; }
+    }
+    if (allMatched && usedC.size >= 2) {
+      for (const cIdx of usedC) {
+        matched.push({ baseline: bEl, comparing: comparing.items[cIdx], identical: true });
+        unmatchedComparing.delete(cIdx);
+      }
+      unmatchedBaseline.delete(bIdx);
+    }
+  }
+
+  // Same in reverse: split comparing field_value items
+  const unmatchedKVCompSplit = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value");
+  for (const { el: cEl, idx: cIdx } of unmatchedKVCompSplit) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    const keyNorm = normalizeValue(cEl.label, mode).toLowerCase();
+    const valNorm = normalizeValue(cEl.value, mode).toLowerCase();
+    let keyMatched = -1;
+    let valMatched = -1;
+    for (const bIdx of unmatchedBaseline) {
+      const bEl = baseline.items[bIdx];
+      if (bEl.kind !== "paragraph" && bEl.kind !== "list_item") continue;
+      const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+      if (keyMatched === -1 && valuesEqual(keyNorm, bNorm)) {
+        keyMatched = bIdx;
+      } else if (valMatched === -1 && valuesEqual(valNorm, bNorm)) {
+        valMatched = bIdx;
+      }
+    }
+    if (keyMatched !== -1 && valMatched !== -1 && keyMatched !== valMatched) {
+      matched.push({ baseline: baseline.items[keyMatched], comparing: cEl, identical: true });
+      matched.push({ baseline: baseline.items[valMatched], comparing: cEl, identical: true });
+      unmatchedComparing.delete(cIdx);
+      unmatchedBaseline.delete(keyMatched);
+      unmatchedBaseline.delete(valMatched);
+      continue;
+    }
+    const keyTokens = cEl.label.trim().split(/\s+/).filter(t => t.length > 0);
+    if (keyTokens.length < 2) continue;
+    const allTokens = [...keyTokens, cEl.value.trim()];
+    const usedB = new Set<number>();
+    let allMatched = true;
+    for (const token of allTokens) {
+      const tokenNorm = normalizeValue(token, mode).toLowerCase();
+      let found = false;
+      for (const bIdx of unmatchedBaseline) {
+        if (usedB.has(bIdx)) continue;
+        const bEl = baseline.items[bIdx];
+        if (bEl.kind !== "paragraph" && bEl.kind !== "list_item") continue;
+        const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+        if (valuesEqual(tokenNorm, bNorm)) {
+          usedB.add(bIdx);
+          found = true;
+          break;
+        }
+      }
+      if (!found) { allMatched = false; break; }
+    }
+    if (allMatched && usedB.size >= 2) {
+      for (const bIdx of usedB) {
+        matched.push({ baseline: baseline.items[bIdx], comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+      }
+      unmatchedComparing.delete(cIdx);
+    }
+  }
+
+  // Phase 2a-extra-2: Join adjacent paragraphs and match against combined items.
+  // When PDF has paragraph("07/31/2026") + paragraph("(Bill Cycle 5 of 5)")
+  // and DOCX has paragraph("07/31/2026 (Bill Cycle 5 of 5)"), join them.
+  const unmatchedParaBaseJoin = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+  for (const { el: bEl, idx: bIdx } of unmatchedParaBaseJoin) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    // Try joining this paragraph with the next 1-2 paragraphs
+    for (let lookahead = 1; lookahead <= 2; lookahead++) {
+      const nextIdx = bIdx + lookahead;
+      if (nextIdx >= baseline.items.length) break;
+      const nextEl = baseline.items[nextIdx];
+      if (!unmatchedBaseline.has(nextIdx)) continue;
+      if (nextEl.kind !== "paragraph" && nextEl.kind !== "list_item") continue;
+      // Try joining all paragraphs from bIdx to nextIdx
+      const joinParts: string[] = [];
+      const joinIndices: number[] = [];
+      let canJoin = true;
+      for (let j = bIdx; j <= nextIdx; j++) {
+        if (!unmatchedBaseline.has(j)) { canJoin = false; break; }
+        const jEl = baseline.items[j];
+        if (jEl.kind !== "paragraph" && jEl.kind !== "list_item") { canJoin = false; break; }
+        joinParts.push(jEl.value.trim());
+        joinIndices.push(j);
+      }
+      if (!canJoin) continue;
+      const joined = joinParts.join(" ");
+      const joinedNorm = normalizeValue(joined, mode).toLowerCase();
+      for (const cIdx of unmatchedComparing) {
+        const cEl = comparing.items[cIdx];
+        if (cEl.kind !== "paragraph" && cEl.kind !== "list_item") continue;
+        const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+        if (valuesEqual(joinedNorm, cNorm)) {
+          // Matched — consume all joined paragraphs and the comparing item
+          for (const ji of joinIndices) {
+            matched.push({ baseline: baseline.items[ji], comparing: cEl, identical: true });
+            unmatchedBaseline.delete(ji);
+          }
+          matched.push({ baseline: bEl, comparing: cEl, identical: true });
+          unmatchedComparing.delete(cIdx);
+          break;
+        }
+      }
+    }
+  }
+
+  // Same in reverse: join comparing paragraphs and match against baseline
+  const unmatchedParaCompJoin = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+  for (const { el: cEl, idx: cIdx } of unmatchedParaCompJoin) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    for (let lookahead = 1; lookahead <= 2; lookahead++) {
+      const nextIdx = cIdx + lookahead;
+      if (nextIdx >= comparing.items.length) break;
+      const nextEl = comparing.items[nextIdx];
+      if (!unmatchedComparing.has(nextIdx)) continue;
+      if (nextEl.kind !== "paragraph" && nextEl.kind !== "list_item") continue;
+      const joinParts: string[] = [];
+      const joinIndices: number[] = [];
+      let canJoin = true;
+      for (let j = cIdx; j <= nextIdx; j++) {
+        if (!unmatchedComparing.has(j)) { canJoin = false; break; }
+        const jEl = comparing.items[j];
+        if (jEl.kind !== "paragraph" && jEl.kind !== "list_item") { canJoin = false; break; }
+        joinParts.push(jEl.value.trim());
+        joinIndices.push(j);
+      }
+      if (!canJoin) continue;
+      const joined = joinParts.join(" ");
+      const joinedNorm = normalizeValue(joined, mode).toLowerCase();
+      for (const bIdx of unmatchedBaseline) {
+        const bEl = baseline.items[bIdx];
+        if (bEl.kind !== "paragraph" && bEl.kind !== "list_item") continue;
+        const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+        if (valuesEqual(joinedNorm, bNorm)) {
+          for (const ji of joinIndices) {
+            matched.push({ baseline: bEl, comparing: comparing.items[ji], identical: true });
+            unmatchedComparing.delete(ji);
+          }
+          matched.push({ baseline: bEl, comparing: cEl, identical: true });
+          unmatchedBaseline.delete(bIdx);
+          break;
+        }
       }
     }
   }
