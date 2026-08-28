@@ -293,12 +293,10 @@ function normalizeCellLines(inputLines: string[]): string[] {
     if (i + 1 < inputLines.length && isAlphaKey(trimmed)) {
       const nextTrimmed = inputLines[i + 1].trim();
       if (isAlphaKey(nextTrimmed)) {
-        // Two consecutive alpha keys — possible header pair.
-        // Also try: current line is alpha key, next is a value (no header).
+        // Two consecutive alpha keys — possible header pair OR multi-column labels.
         // Scan forward to find how many consecutive key-value pairs exist.
         // Stop at the first pair that doesn't look like key-value,
-        // or when we run out of lines.  This is resilient to trailing
-        // paragraphs that always appear in real documents.
+        // or when we run out of lines.
         let rowCount = 0;
         let rowIdx = i + 2;
         let naturalEnd = true;
@@ -308,10 +306,23 @@ function normalizeCellLines(inputLines: string[]): string[] {
           if (k === "" || v === "") { naturalEnd = false; break; }
           if (!isKeyLike(k) || !isValue(v)) { naturalEnd = false; break; }
           // Stop if value is a pure alpha key — likely a section header, not data.
-          // e.g. "Due Date" → "ADVANCE DEPOSIT" should not be a data row.
           if (isAlphaKey(v)) { naturalEnd = false; break; }
           rowCount++;
           rowIdx += 2;
+        }
+
+        // CRITICAL: Also reject if the first data row's KEY is a non-alpha
+        // identifier (like "016543") — this means the scan found values from
+        // a 2-column layout, not a header+data table.
+        // e.g. lines: ADVANCE DEPOSIT, Client Number, Client Name, 016543,
+        // Borough Of Ridgway → "016543" is not a header, so this is NOT a table.
+        const firstDataKey = inputLines[i + 2]?.trim();
+        const firstDataVal = inputLines[i + 3]?.trim();
+        if (firstDataKey && !isAlphaKey(firstDataKey) && firstDataVal && isAlphaKey(firstDataVal)) {
+          // This is a 2-column layout: labels in first 2 lines, values in next 2.
+          // Do NOT accept as table — emit as separate paragraphs.
+          naturalEnd = false;
+          rowCount = 0;
         }
 
         // Accept as table if:
@@ -331,13 +342,35 @@ function normalizeCellLines(inputLines: string[]): string[] {
           }
           i = rowIdx;
           continue;
-        }      }
+        }
+      }
     }
 
     // Fallback for alternating key-value lines where the value is NOT
     // an alpha key (e.g. "Client Number" → "016543" or
     // "Claims Paid Thru" → "07/31/2026 (Bill Cycle 5 of 5)").
     if (i + 1 < inputLines.length && isAlphaKey(trimmed) && trimmed.length <= 25) {
+      // CRITICAL: Detect multi-column layout BEFORE entering fallback.
+      // Count consecutive alpha-only lines from the current position.
+      // If 2+ consecutive alpha keys appear before any non-alpha value,
+      // this is a 2-column table layout (labels in left and right columns).
+      // Do NOT pair across columns.
+      let consecutiveAlpha = 0;
+      for (let lookIdx = i; lookIdx < inputLines.length && lookIdx < i + 6; lookIdx++) {
+        const lookVal = inputLines[lookIdx].trim();
+        if (lookVal !== "" && isAlphaKey(lookVal)) {
+          consecutiveAlpha++;
+        } else {
+          break;
+        }
+      }
+      if (consecutiveAlpha >= 2) {
+        // 2+ consecutive alpha keys at the start = multi-column layout.
+        // Emit this line as a paragraph and move on.
+        result.push(inputLines[i]);
+        i++;
+        continue;
+      }
       const nextTrimmed = inputLines[i + 1].trim();
       // CRITICAL: Do NOT pair if the next line is already structured data:
       // - contains 2+ consecutive spaces (space-separated table row)
@@ -382,6 +415,15 @@ function normalizeCellLines(inputLines: string[]): string[] {
         //   "Client Name" → "Borough Of Ridgway"  (stops here: alpha key)
         const isStandalonePair = (fallbackCount === 0 || fallbackCount === 1) && fbIdx <= i + 2;
         if (fallbackCount >= 1 && (fbEnd || fallbackCount >= 2)) {
+          // CRITICAL: Do NOT emit the first pair if the "value" is an alpha key
+          // (e.g. "Borough Of Ridgway" → "Invoice Number" — both are labels,
+          // not a field_value pair). This happens in 2-column RTF layouts where
+          // labels from adjacent columns appear consecutively.
+          if (isAlphaKey(nextTrimmed)) {
+            // Skip this pair entirely — both are labels
+            i++;
+            continue;
+          }
           // Emit without header — first pair is data
           // Save the trimmed end position so emit loop stops at the right place
           const emitEnd = fbIdx;
@@ -403,9 +445,17 @@ function normalizeCellLines(inputLines: string[]): string[] {
           i = fbIdx;
           continue;
         } else if (isStandalonePair && trimmed.length <= 20 && nextTrimmed.length <= 40 && !/  /.test(nextTrimmed) && !/\t/.test(nextTrimmed) && !isAlphaKey(nextTrimmed)) {
-          // Single standalone pair: short key + short non-alpha value
-          // Exclude pure-alpha values (likely section headers, not real values)
-          // e.g. "Due Date" should NOT pair with "ADVANCE DEPOSIT"
+          // CRITICAL: Lookahead — if the line AFTER the value is an alpha key,
+          // this is a multi-column layout (e.g., labels in 2 columns followed by
+          // values). Do NOT pair.
+          // Pattern: alpha_key → value → alpha_key → value = 2-column layout
+          const afterValue = inputLines[i + 2]?.trim();
+          const afterIsAlpha = afterValue != null && isAlphaKey(afterValue) && afterValue.length > 3;
+          if (afterIsAlpha) {
+            result.push(inputLines[i]);
+            i++;
+            continue;
+          }
           result.push(`${trimmed} | ${nextTrimmed}`);
           i += 2;
           continue;
@@ -975,6 +1025,166 @@ export function compareCanonical(
         unmatchedBaseline.delete(bIdx);
         unmatchedComparing.delete(cIdx);
         usedComp.add(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Phase 2b: Match standalone label paragraphs against field_values.
+  // When one format produces "Client Number" as a standalone paragraph and
+  // the other produces field_value("client number", "016543"), match the
+  // paragraph against the field_value's key. Also consume the NEXT paragraph
+  // if it matches the field_value's value.
+  const unmatchedKVBase2b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedParaComp2b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+
+  for (const { el: cEl, idx: cIdx } of unmatchedParaComp2b) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    // Only match short, alpha-only paragraphs (standalone labels)
+    if (cEl.value.length > 35 || cEl.value.length < 2) continue;
+    if (!/^[A-Za-z][A-Za-z ]*$/.test(cEl.value.trim())) continue;
+    const cKey = normalizeKey(cEl.value);
+    for (const { el: bEl, idx: bIdx } of unmatchedKVBase2b) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      if (bEl.key === cKey) {
+        // STRICT: Only match if the NEXT comparing paragraph matches the
+        // field_value's value. This prevents matching "Client Number"
+        // against field_value("client number", "016543") when the next
+        // paragraph is "Client Name" (not "016543").
+        const bValNorm = normalizeValue(bEl.value, mode).toLowerCase();
+        const nextIdx = cIdx + 1;
+        let valueConsumed = false;
+        if (nextIdx < comparing.items.length && unmatchedComparing.has(nextIdx)) {
+          const nextEl = comparing.items[nextIdx];
+          if (nextEl.kind === "paragraph" || nextEl.kind === "list_item") {
+            const cNextNorm = normalizeValue(nextEl.value, mode).toLowerCase();
+            if (valuesEqual(bValNorm, cNextNorm)) {
+              // Both key AND value match — commit the match
+              matched.push({ baseline: bEl, comparing: cEl, identical: true });
+              unmatchedBaseline.delete(bIdx);
+              unmatchedComparing.delete(cIdx);
+              matched.push({ baseline: bEl, comparing: nextEl, identical: true });
+              unmatchedComparing.delete(nextIdx);
+              valueConsumed = true;
+            }
+          }
+        }
+        // If no value paragraph was found, try to find the value paragraph
+        // at ANY later position (handles cases where paragraphs are not
+        // strictly consecutive, e.g., "Client Number" ... "016543" with
+        // other paragraphs in between).
+        if (!valueConsumed) {
+          for (let lookIdx = cIdx + 1; lookIdx < comparing.items.length && lookIdx <= cIdx + 5; lookIdx++) {
+            if (!unmatchedComparing.has(lookIdx)) continue;
+            const lookEl = comparing.items[lookIdx];
+            if (lookEl.kind !== "paragraph" && lookEl.kind !== "list_item") continue;
+            const lookNorm = normalizeValue(lookEl.value, mode).toLowerCase();
+            if (valuesEqual(bValNorm, lookNorm)) {
+              matched.push({ baseline: bEl, comparing: cEl, identical: true });
+              unmatchedBaseline.delete(bIdx);
+              unmatchedComparing.delete(cIdx);
+              matched.push({ baseline: bEl, comparing: lookEl, identical: true });
+              unmatchedComparing.delete(lookIdx);
+              valueConsumed = true;
+              break;
+            }
+          }
+        }
+        // If STILL no value match, skip this key match entirely.
+        // Let Phase 2c handle the value paragraph separately.
+        if (!valueConsumed) break;
+        break;
+      }
+    }
+  }
+
+  // Phase 2c: Match standalone VALUE paragraphs against field_value values.
+  // When RTF produces "016543" as a standalone paragraph and PDF has
+  // field_value("client number", "016543"), match the paragraph against
+  // the field_value's VALUE (not key).
+  const unmatchedKVBase2c = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedParaComp2c = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+
+  for (const { el: cEl, idx: cIdx } of unmatchedParaComp2c) {
+    if (!unmatchedComparing.has(cIdx)) continue;
+    if (cEl.value.length > 40 || cEl.value.length < 1) continue;
+    const cNorm = normalizeValue(cEl.value, mode).toLowerCase();
+    for (const { el: bEl, idx: bIdx } of unmatchedKVBase2c) {
+      if (!unmatchedBaseline.has(bIdx)) continue;
+      const bValNorm = normalizeValue(bEl.value, mode).toLowerCase();
+      if (valuesEqual(cNorm, bValNorm) && bValNorm.length >= 1) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedBaseline.delete(bIdx);
+        unmatchedComparing.delete(cIdx);
+        break;
+      }
+    }
+  }
+
+  // Same in reverse: standalone value paragraphs in baseline against field_values in comparing
+  const unmatchedKVComp2b = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedParaBase2b = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+
+  for (const { el: bEl, idx: bIdx } of unmatchedParaBase2b) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    if (bEl.value.length > 35 || bEl.value.length < 2) continue;
+    if (!/^[A-Za-z][A-Za-z ]*$/.test(bEl.value.trim())) continue;
+    const bKey = normalizeKey(bEl.value);
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComp2b) {
+      if (!unmatchedComparing.has(cIdx)) continue;
+      if (cEl.key === bKey) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedComparing.delete(cIdx);
+        unmatchedBaseline.delete(bIdx);
+        // Also consume the NEXT baseline paragraph if it matches the value
+        const nextIdx = bIdx + 1;
+        if (nextIdx < baseline.items.length && unmatchedBaseline.has(nextIdx)) {
+          const nextEl = baseline.items[nextIdx];
+          if (nextEl.kind === "paragraph" || nextEl.kind === "list_item") {
+            const cValNorm = normalizeValue(cEl.value, mode).toLowerCase();
+            const bNextNorm = normalizeValue(nextEl.value, mode).toLowerCase();
+            if (valuesEqual(cValNorm, bNextNorm)) {
+              matched.push({ baseline: nextEl, comparing: cEl, identical: true });
+              unmatchedBaseline.delete(nextIdx);
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // Phase 2c-reverse: Match standalone value paragraphs in baseline against field_values in comparing
+  const unmatchedKVComp2cr = Array.from(unmatchedComparing)
+    .map(i => ({ el: comparing.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "field_value" || el.kind === "heading");
+  const unmatchedParaBase2cr = Array.from(unmatchedBaseline)
+    .map(i => ({ el: baseline.items[i], idx: i }))
+    .filter(({ el }) => el.kind === "paragraph" || el.kind === "list_item");
+
+  for (const { el: bEl, idx: bIdx } of unmatchedParaBase2cr) {
+    if (!unmatchedBaseline.has(bIdx)) continue;
+    if (bEl.value.length > 40 || bEl.value.length < 1) continue;
+    const bNorm = normalizeValue(bEl.value, mode).toLowerCase();
+    for (const { el: cEl, idx: cIdx } of unmatchedKVComp2cr) {
+      if (!unmatchedComparing.has(cIdx)) continue;
+      const cValNorm = normalizeValue(cEl.value, mode).toLowerCase();
+      if (valuesEqual(bNorm, cValNorm) && cValNorm.length >= 1) {
+        matched.push({ baseline: bEl, comparing: cEl, identical: true });
+        unmatchedComparing.delete(cIdx);
+        unmatchedBaseline.delete(bIdx);
         break;
       }
     }
