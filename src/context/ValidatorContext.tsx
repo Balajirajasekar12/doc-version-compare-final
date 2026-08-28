@@ -184,15 +184,22 @@ function useChainPipeline(
         const baselineCanonical = toCanonical(baselineDoc);
         const comparingCanonical = toCanonical(comparingDoc);
 
-        // ═══ DVC DIAGNOSTIC: log canonical items for debugging ═══
-        if (baselineDoc.ext === 'pdf' || comparingDoc.ext === 'pdf') {
+        // ═══ DVC DIAGNOSTIC: log raw parser lines + canonical items ═══
+        if (baselineDoc.ext === 'pdf' || comparingDoc.ext === 'pdf' || comparingDoc.ext === 'rtf') {
+          for (const [label, doc] of [['BASELINE', baselineDoc], ['COMPARING', comparingDoc]] as const) {
+            if (doc.content?.type === 'text') {
+              const rawLines = doc.content.lines;
+              console.log(`[DVC-DIAG] ${label} (${doc.ext}) RAW LINES (${rawLines.length}):`);
+              rawLines.forEach((l: string, i: number) => console.log(`  [${i}] "${l.substring(0, 120)}"`));
+            }
+          }
           const fmt = (d: typeof baselineDoc, canDoc: typeof baselineCanonical) => {
             return canDoc.items.map(i =>
-              i.kind === 'field_value' ? `fv(${i.key}=${i.value})` : `${i.kind}(${(i.value || '').substring(0,40)})`
+              i.kind === 'field_value' ? `fv(${i.key}=${i.value})` : `${i.kind}(${(i.value || '').substring(0,60)})`
             ).join('\n');
           };
-          console.log(`[DVC-DIAG] ${pair.baselineFormat} (${baselineDoc.ext}) items:\n${fmt(baselineDoc, baselineCanonical)}`);
-          console.log(`[DVC-DIAG] ${pair.comparingFormat} (${comparingDoc.ext}) items:\n${fmt(comparingDoc, comparingCanonical)}`);
+          console.log(`[DVC-DIAG] ${pair.baselineFormat} (${baselineDoc.ext}) CANONICAL:\n${fmt(baselineDoc, baselineCanonical)}`);
+          console.log(`[DVC-DIAG] ${pair.comparingFormat} (${comparingDoc.ext}) CANONICAL:\n${fmt(comparingDoc, comparingCanonical)}`);
         }
         // ═══ END DIAGNOSTIC ═══
 
