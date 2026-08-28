@@ -531,6 +531,17 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
       }
     }
   }
+  // Fallback: scan rowByNum for rows that have <c> children but weren't
+  // captured by the cell parser (e.g. table cells, special types, etc.).
+  // These rows exist in the XML and likely contain visible content.
+  for (const [rowNum, rowEl] of sheet.rowByNum) {
+    if (!contentRows.has(rowNum)) {
+      const cellEls = childElements(rowEl, "c");
+      if (cellEls.length > 0) {
+        contentRows.add(rowNum);
+      }
+    }
+  }
   const sorted = Array.from(contentRows).sort((a, b) => a - b);
   if (sorted.length === 0) return [];
   if (sorted.length === 1) {
