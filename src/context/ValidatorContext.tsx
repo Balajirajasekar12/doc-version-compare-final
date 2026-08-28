@@ -183,11 +183,42 @@ function useChainPipeline(
         // Use canonical comparison engine (format-agnostic)
         const baselineCanonical = toCanonical(baselineDoc);
         const comparingCanonical = toCanonical(comparingDoc);
+
+        // ═══ DVC DIAGNOSTIC: log canonical items for debugging ═══
+        if (baselineDoc.ext === 'pdf' || comparingDoc.ext === 'pdf') {
+          const fmt = (d: typeof baselineDoc, canDoc: typeof baselineCanonical) => {
+            return canDoc.items.map(i =>
+              i.kind === 'field_value' ? `fv(${i.key}=${i.value})` : `${i.kind}(${(i.value || '').substring(0,40)})`
+            ).join('\n');
+          };
+          console.log(`[DVC-DIAG] ${pair.baselineFormat} (${baselineDoc.ext}) items:\n${fmt(baselineDoc, baselineCanonical)}`);
+          console.log(`[DVC-DIAG] ${pair.comparingFormat} (${comparingDoc.ext}) items:\n${fmt(comparingDoc, comparingCanonical)}`);
+        }
+        // ═══ END DIAGNOSTIC ═══
+
         const matchResult = compareCanonical(
           baselineCanonical,
           comparingCanonical,
           comparisonMode,
         );
+
+        // ═══ DVC DIAGNOSTIC: log match results ═══
+        if (baselineDoc.ext === 'pdf' || comparingDoc.ext === 'pdf') {
+          const mismatches = matchResult.matched.filter(m => !m.identical);
+          const missing = matchResult.missingInComparing;
+          const added = matchResult.addedInComparing;
+          console.log(`[DVC-DIAG] MATCH RESULT: matched=${matchResult.matched.length} identical=${matchResult.matched.filter(m=>m.identical).length} mismatches=${mismatches.length} missing=${missing.length} added=${added.length}`);
+          for (const m of mismatches) {
+            console.log(`[DVC-DIAG] MISMATCH: baseline=${JSON.stringify(m.baseline)} comparing=${JSON.stringify(m.comparing)}`);
+          }
+          for (const m of missing) {
+            console.log(`[DVC-DIAG] MISSING: ${JSON.stringify(m)}`);
+          }
+          for (const m of added) {
+            console.log(`[DVC-DIAG] ADDED: ${JSON.stringify(m)}`);
+          }
+        }
+        // ═══ END DIAGNOSTIC ═══
 
         const pairDiffs = generateCanonicalDiffs(
           group.id,
