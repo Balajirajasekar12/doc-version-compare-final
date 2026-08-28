@@ -521,7 +521,11 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
   const contentRows = new Set<number>();
   for (const [row, cells] of sheet.cells) {
     for (const cell of cells.values()) {
-      if (cell.text?.trim()) {
+      // Count rows with ANY non-empty cell: strings (text), numbers (value),
+      // booleans, formulas — not just text-only cells.  Numeric cells like
+      // "$4,684.73" have text=undefined but value="4684.73" and must be
+      // detected as content so images aren't placed on top of them.
+      if (cell.text?.trim() || (cell.value != null && String(cell.value).trim())) {
         contentRows.add(row);
         break;
       }
