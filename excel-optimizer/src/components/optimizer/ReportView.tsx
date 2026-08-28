@@ -74,6 +74,20 @@ export function ReportView({ report, blob, downloadName, originalBlob, originalN
       ...report.warnings.map((w) => `Warning: ${w}`),
       ...(report.audit ?? []).map((a) => `AUDIT | ${a}`),
     ];
+    // Append DRAWING debug logs for image overlap diagnosis
+    try {
+      const { debugLog } = await import("@eo/lib/excel/debug-log");
+      const drawingEntries = debugLog.getEntries().filter((e) => e.stage.startsWith("DRAWING"));
+      if (drawingEntries.length > 0) {
+        lines.push("");
+        lines.push("DRAWING DEBUG LOG:");
+        for (const entry of drawingEntries) {
+          lines.push(`  [${entry.stage}] ${entry.message}`);
+        }
+      }
+    } catch {
+      // debug-log import may fail in some environments
+    }
     try {
       await navigator.clipboard.writeText(lines.join("\n"));
       setCopied(true);
