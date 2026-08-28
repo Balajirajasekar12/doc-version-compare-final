@@ -104,7 +104,7 @@ function isPipeTableRow(line: string): boolean {
   }
   // Strict alpha check for HEADER identification only.
   function isAlphaKey(s: string): boolean {
-    return s.length > 0 && s.length < 30 &&
+    return s.length > 0 && s.length < 50 &&
       /^[A-Za-z][A-Za-z ]*$/.test(s) &&
       !s.includes(":") && !s.includes("|");
   }

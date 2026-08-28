@@ -269,7 +269,7 @@ function normalizeCellLines(inputLines: string[]): string[] {
   // A strict "key" check: alpha-only text, no digits/hyphens.
   // Used to identify table header rows ("Field", "Value").
   function isAlphaKey(s: string): boolean {
-    return s.length > 0 && s.length < 30 &&
+    return s.length > 0 && s.length < 50 &&
       /^[A-Za-z][A-Za-z]*(?: [A-Za-z]+)*$/.test(s) &&
       !s.includes(":") && !s.includes("|");
   }
@@ -344,8 +344,7 @@ function normalizeCellLines(inputLines: string[]): string[] {
       // - contains pipe characters (already pipe-delimited)
       // - contains tab characters (already tab-delimited)
       // These should be parsed by extractFieldValuesFromText, not consumed here.
-      const isStructuredData = /\S\s{2,}\S/.test(nextTrimmed) || nextTrimmed.includes("|") || nextTrimmed.includes("	");
-      if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60 && !isStructuredData) {
+      const isStructuredData = /\S\s{2,}\S/.test(nextTrimmed) || nextTrimmed.includes("|") || nextTrimmed.includes("	");        if (isValue(nextTrimmed) && !isAlphaKey(nextTrimmed) && nextTrimmed.length <= 60 && !isStructuredData && !/^[A-Z][A-Z ]+$/.test(nextTrimmed)) {
         // Scan forward for additional key-value pairs
         let fallbackCount = 0;
         let fbIdx = i + 2;
@@ -586,32 +585,34 @@ function textToCanonical(doc: ParsedDoc): ContentItem[] {
       }
     }
 
-    // Data rows: for multi-column tables (3+ columns), convert each row
-    // to a paragraph with all cell values. For 2-column tables, keep as
-    // field_value pairs.
+    // Data rows become field_value items
+    // For multi-column rows (3+ columns), emit ALL columns as separate items
+    // so content is preserved for cross-format comparison.
     for (let r = startRow; r < block.rows.length; r++) {
       const row = block.rows[r];
       if (row.length >= 2) {
         const field = row[0].trim();
         const value = row[1].trim();
         if (field !== "" && value !== "") {
-          if (isMultiColHeader || row.length > 2) {
-            // Multi-column row: emit as paragraph with all non-empty cells
-            const allCells = row.filter(c => c.trim() !== "").join(", ");
+          items.push({
+            key: normalizeKey(field),
+            label: field,
+            value,
+            kind: "field_value",
+            sourceLocation: `Line ${block.start + 1 + r}`,
+          });
+        }
+        // Emit additional columns (3+) as paragraph items
+        // so they can be matched against separate lines in other formats
+        for (let c = 2; c < row.length; c++) {
+          const extra = row[c].trim();
+          if (extra !== "") {
             items.push({
-              key: normalizeKey(field),
-              label: field,
-              value: allCells,
+              key: `para_${items.length}`,
+              label: extra,
+              value: extra,
               kind: "paragraph",
-              sourceLocation: `Line ${block.start + 1 + r}`,
-            });
-          } else {
-            items.push({
-              key: normalizeKey(field),
-              label: field,
-              value,
-              kind: "field_value",
-              sourceLocation: `Line ${block.start + 1 + r}`,
+              sourceLocation: `Line ${block.start + 1 + r} col ${c + 1}`,
             });
           }
         }
