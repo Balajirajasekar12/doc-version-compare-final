@@ -909,7 +909,7 @@ export async function fixDrawingOverlaps(
 
   // Content boundary = bottom of ALL content (for overlap/conflict stats).
   const contentBoundaryY = blocks.length > 0 ? blocks[blocks.length - 1].endY : 0;
-  stats.contentConflictsBefore = countContentConflicts(rects, contentBoundaryY);
+  stats.contentConflictsBefore = countContentConflicts(rects, blocks);
 
   // Cell mapping: tracks how cell references shift due to row insertions.
   let cellMapping = new Map<string, string>();
@@ -920,11 +920,14 @@ export async function fixDrawingOverlaps(
   const movedByContentPush = await placeImagesByBlock(rects, blocks, geom, sheet, zip, sheetFile, cellMapping);
   debugLog.log("DRAWING", `  placeImagesByBlock: ${movedByContentPush} images placed after their content blocks`);
 
-  // Mark which anchors overlap content.
+  // Mark which anchors overlap content (using actual block intersection).
   for (let i = 0; i < rects.length; i++) {
-    if (rects[i].y1 < contentBoundaryY) {
-      anchorInfos[i].overlapsContent = true;
-    }
+    const r = rects[i];
+    const imgTop = r.y1;
+    const imgBottom = r.y1 + r.h;
+    anchorInfos[i].overlapsContent = blocks.some((block) => {
+      return imgTop < block.endY && imgBottom > block.startY;
+    });
   }
 
   // Mark which anchors overlap each other.
@@ -949,8 +952,8 @@ export async function fixDrawingOverlaps(
   for (const ai of anchorInfos) {
     const r = rects[ai.index];
     const imgBottom = r ? Math.round(r.y1 + r.h) : 0;
-    const contentOverlap = r ? r.y1 < contentBoundaryY : false;
-    debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} topY=${r ? Math.round(r.y1) : '?'} bottomY=${imgBottom} boundaryY=${Math.round(contentBoundaryY)} overlapsContent=${contentOverlap} overlapsWith=[${ai.overlapsWith.join(",")}]`);
+    const contentOverlap = r ? blocks.some((block) => r.y1 < block.endY && (r.y1 + r.h) > block.startY) : false;
+    debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} topY=${r ? Math.round(r.y1) : '?'} bottomY=${imgBottom} overlapsContent=${contentOverlap} overlapsWith=[${ai.overlapsWith.join(",")}]`);
   }
 
   // Phase 3: Resolve any remaining image-image overlaps.
@@ -986,8 +989,7 @@ export async function fixDrawingOverlaps(
   // Phase 5: Count final stats.
   stats.overlapsAfter = countOverlaps(rects);
   const finalBlocks = findAllContentBlocks(sheet, geom);
-  const finalBoundaryY = finalBlocks.length > 0 ? finalBlocks[finalBlocks.length - 1].endY : contentBoundaryY;
-  stats.contentConflictsAfter = countContentConflicts(rects, finalBoundaryY);
+  stats.contentConflictsAfter = countContentConflicts(rects, finalBlocks);
   // Track whether x position changed too (for column A migration).
   stats.imagesRepositioned = rects.filter((r) => r.newY1 !== r.y1 || r.x1 !== (r.x2 - r.w)).length;
   stats.imagesResized = rects.filter((r) => {
@@ -1133,8 +1135,18 @@ function countOverlaps(rects: AnchorRect[]): number {
  * Uses newY1 (the position after repositioning) so the 'after' count
  * reflects the actual final state.
  */
-function countContentConflicts(rects: AnchorRect[], contentBoundaryY: number): number {
-  return rects.filter((r) => r.newY1 < contentBoundaryY).length;
+function countContentConflicts(rects: AnchorRect[], blocks: ContentBlock[]): number {
+  // Count images that ACTUALLY overlap a content block (AABB intersection).
+  // Previous version used contentBoundaryY (bottom of last block), which
+  // falsely counted images in gaps between blocks as conflicts.
+  return rects.filter((r) => {
+    const imgTop = r.newY1;
+    const imgBottom = r.newY1 + r.h;
+    return blocks.some((block) => {
+      // Vertical overlap: image top < block bottom AND image bottom > block top
+      return imgTop < block.endY && imgBottom > block.startY;
+    });
+  }).length;
 }
 
 /**
