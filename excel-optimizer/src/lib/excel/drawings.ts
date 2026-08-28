@@ -359,6 +359,7 @@ async function processVmlDrawings(
   sheet: ParsedSheet,
   contentBoundaryRow: number,
 ): Promise<number> {
+  debugLog.log("DRAWING", `  processVmlDrawings: contentBoundaryRow=${contentBoundaryRow}`);
   // Find VML drawing from sheet rels.
   const rels = await resolveSheetRels(zip, sheetFile);
   let vmlTarget: string | null = null;
@@ -368,10 +369,18 @@ async function processVmlDrawings(
       break;
     }
   }
-  if (!vmlTarget) return 0;
+  if (!vmlTarget) {
+    debugLog.log("DRAWING", `  processVmlDrawings: no VML drawing rel found`);
+    return 0;
+  }
+  debugLog.log("DRAWING", `  processVmlDrawings: vmlTarget=${vmlTarget}`);
 
   const vmlXml = await readEntryText(zip, vmlTarget);
-  if (!vmlXml || typeof vmlXml !== "string") return 0;
+  if (!vmlXml || typeof vmlXml !== "string") {
+    debugLog.log("DRAWING", `  processVmlDrawings: VML XML is empty or not a string`);
+    return 0;
+  }
+  debugLog.log("DRAWING", `  processVmlDrawings: VML XML length=${vmlXml.length}, hasImagedata=${vmlXml.includes('imagedata')}`);
 
   // Check if there are any shapes with imagedata.
   if (!vmlXml.includes("imagedata")) return 0;
@@ -751,6 +760,8 @@ export async function fixDrawingOverlaps(
   sheet: ParsedSheet,
   sheetFile: string,
 ): Promise<ImageOptimizationStats> {
+  debugLog.log("DRAWING", `fixDrawingOverlaps START: sheet=${sheetFile}, hasDrawing=${sheet.hasDrawing}, cells=${sheet.cells.size}, maxRow=${sheet.maxRow}`);
+
   const emptyStats: ImageOptimizationStats = {
     imagesBefore: 0,
     imagesAfter: 0,
@@ -764,7 +775,10 @@ export async function fixDrawingOverlaps(
     anchors: [],
   };
 
-  if (!sheet.hasDrawing) return emptyStats;
+  if (!sheet.hasDrawing) {
+    debugLog.log("DRAWING", `  SKIP: hasDrawing=false — no <drawing> or <legacyDrawing> in sheet XML`);
+    return emptyStats;
+  }
 
   const rels = await resolveSheetRels(zip, sheetFile);
   let drawingTarget: string | null = null;
@@ -774,7 +788,11 @@ export async function fixDrawingOverlaps(
       break;
     }
   }
-  if (!drawingTarget) return emptyStats;
+  if (!drawingTarget) {
+    debugLog.log("DRAWING", `  SKIP: no drawing rel found. Available rels: ${Array.from(rels.values()).map(r => r.type.split('/').pop()).join(', ')}`);
+    return emptyStats;
+  }
+  debugLog.log("DRAWING", `  drawingTarget=${drawingTarget}`);
 
   const originalXml = await readEntryText(zip, drawingTarget);
   if (!originalXml) return emptyStats;
@@ -783,10 +801,12 @@ export async function fixDrawingOverlaps(
   let doc: XmlDoc;
   try {
     doc = parseXml(originalXml);
-  } catch {
+  } catch (err) {
+    debugLog.log("DRAWING", `  SKIP: XML parse failed: ${err}`);
     return emptyStats;
   }
   const root = doc.documentElement!;
+  debugLog.log("DRAWING", `  XML parsed OK. Root tag: ${root.localName || root.nodeName}`);
 
   // Find ALL anchor elements, deduplicating mc:Choice/mc:Fallback pairs
   // but keeping distinct anchors that share the same r:embed.
@@ -819,7 +839,20 @@ export async function fixDrawingOverlaps(
     return result;
   }
   const allAnchors = findAllAnchors(root);
-  if (allAnchors.length === 0) return emptyStats;
+  debugLog.log("DRAWING", `  Found ${allAnchors.length} anchors with embed IDs in drawing XML`);
+  if (allAnchors.length === 0) {
+    // Log what top-level elements exist for debugging
+    const topTags: string[] = [];
+    for (let i = 0; i < root.childNodes.length; i++) {
+      const child = root.childNodes[i];
+      if (child.nodeType === 1) {
+        const el = child as XmlEl;
+        topTags.push(el.localName || el.nodeName);
+      }
+    }
+    debugLog.log("DRAWING", `  Drawing XML top-level elements: [${topTags.join(', ')}]`);
+    return emptyStats;
+  }
 
   const geom = new DrawingGeometry(sheet);
   const rects: AnchorRect[] = [];
@@ -828,8 +861,11 @@ export async function fixDrawingOverlaps(
     if (r) {
       r.index = i;
       rects.push(r);
+    } else {
+      debugLog.log("DRAWING", `  Anchor #${i} (embed=${allAnchors[i].embedId}): FAILED to parse`);
     }
   }
+  debugLog.log("DRAWING", `  Parsed ${rects.length} valid rects from ${allAnchors.length} anchors`);
   if (rects.length === 0) return emptyStats;
 
   // Build detailed anchor info for diagnostics.
@@ -1032,13 +1068,13 @@ export async function fixDrawingOverlaps(
       }
     }
   }
+  debugLog.log("DRAWING", `  VML check: maxContentRow=${maxContentRow}, blocks=${blocks.length}`);
   if (maxContentRow > 0) {
     // Use the content block end row for VML boundary (most accurate)
     const vmlBoundary = blocks.length > 0 ? blocks[blocks.length - 1].endRow + 1 : maxContentRow + 1;
+    debugLog.log("DRAWING", `  VML boundary: ${vmlBoundary}`);
     const vmlMoved = await processVmlDrawings(zip, sheetFile, sheet, vmlBoundary);
-    if (vmlMoved > 0) {
-      debugLog.log("DRAWING", `  VML: ${vmlMoved} shapes moved below content`);
-    }
+    debugLog.log("DRAWING", `  VML result: ${vmlMoved} shapes moved`);
   }
 
   stats.cellMapping = cellMapping;
