@@ -422,14 +422,19 @@ async function processVmlDrawings(
     const toRow = parseInt(anchorMatch[7]);
     const toRowOff = parseInt(anchorMatch[8]);
 
-    // Check if this shape overlaps content (row < contentBoundaryRow).
-    if (fromRow >= contentBoundaryRow) continue; // already below content
-
-    // Calculate new position: place below content.
-    // Image height in EMU from row height difference.
+    // Check if this shape's BOUNDING BOX overlaps content.
+    // An image anchored below content but with large height can still
+    // extend upward into the content area. We must check the full box.
     const fromY = geom.rowStart(fromRow - 1) + fromRowOff;
     const toY = geom.rowStart(toRow - 1) + toRowOff;
-    const imageHeight = toY - fromY;
+    const imageTop = Math.min(fromY, toY);
+    const imageBottom = Math.max(fromY, toY);
+    const imageHeight = imageBottom - imageTop;
+    // Image overlaps content if its top is above the content boundary
+    // (the bottom of the last content row).
+    if (imageTop >= boundaryY) continue; // image starts below content
+
+    // Calculate new position: place below content.
 
     // Place at next available Y.
     const newY1 = Math.max(fromY, nextAvailableY);
@@ -896,9 +901,16 @@ export async function fixDrawingOverlaps(
   }
 
   debugLog.log("DRAWING", `fixDrawingOverlaps: ${rects.length} images, overlapsBefore=${stats.overlapsBefore}, contentConflictsBefore=${stats.contentConflictsBefore}`);
-  // Log detailed per-anchor info.
+  debugLog.log("DRAWING", `  contentBoundaryY=${contentBoundaryY}, blocks=${blocks.length}`);
+  for (const b of blocks) {
+    debugLog.log("DRAWING", `  Block: rows ${b.startRow}-${b.endRow} (Y ${b.startY}-${b.endY})`);
+  }
+  // Log detailed per-anchor info with overlap analysis.
   for (const ai of anchorInfos) {
-    debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} overlapsContent=${ai.overlapsContent} overlapsWith=[${ai.overlapsWith.join(",")}]`);
+    const r = rects[ai.index];
+    const imgBottom = r ? Math.round(r.y1 + r.h) : 0;
+    const contentOverlap = r ? r.y1 < contentBoundaryY : false;
+    debugLog.log("DRAWING_ANCHOR", `  #${ai.index}: from=(${ai.fromCol},${ai.fromRow}) to=(${ai.toCol},${ai.toRow}) size=${ai.widthEmu}x${ai.heightEmu} topY=${r ? Math.round(r.y1) : '?'} bottomY=${imgBottom} boundaryY=${Math.round(contentBoundaryY)} overlapsContent=${contentOverlap} overlapsWith=[${ai.overlapsWith.join(",")}]`);
   }
 
   // Phase 3: Resolve any remaining image-image overlaps.
@@ -944,6 +956,11 @@ export async function fixDrawingOverlaps(
     return Math.abs(newW - (r.x2 - r.x1)) > EMU_PER_PX ||
            Math.abs(newH - (r.y2 - r.y1)) > EMU_PER_PX;
   }).length;    debugLog.log("DRAWING", `  final: overlapsAfter=${stats.overlapsAfter}, contentConflictsAfter=${stats.contentConflictsAfter}, repositioned=${stats.imagesRepositioned}`);
+  for (const ai of anchorInfos) {
+    const r = rects[ai.index];
+    const moved = r ? Math.abs(r.newY1 - r.y1) > EMU_PER_PX : false;
+    debugLog.log("DRAWING_RESULT", `  #${ai.index}: moved=${moved} fromY=${r ? Math.round(r.y1) : '?'} toY=${r ? Math.round(r.newY1) : '?'} diff=${r ? Math.round(r.newY1 - r.y1) : '?'} px`);
+  }
 
   // ── Write corrected positions back to the drawing XML ──
   // Uses STRING-based modification on the original XML.
