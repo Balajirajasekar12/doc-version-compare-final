@@ -666,13 +666,14 @@ async function placeImagesByBlock(
     // Start placing images 1px below the block.
     let currentY = blockEndY + EMU_PER_PX;
 
-    // Place images stacked vertically, preserving original horizontal positions.
-    // This keeps the visual layout consistent — images stay where they were
-    // horizontally, just moved below their content block vertically.
+    // Place images stacked vertically at column A.
     let imagesBottomY = currentY; // bottom of the last image placed
     for (const img of images) {
-      if (img.newY1 !== currentY) {
+      if (img.newY1 !== currentY || img.x1 !== 0) {
         img.newY1 = currentY;
+        const originalWidth = img.x2 - img.x1;
+        img.x1 = 0;
+        img.x2 = originalWidth;
         moved++;
       }
       imagesBottomY = currentY + img.h;
@@ -731,8 +732,11 @@ async function placeImagesByBlock(
     let currentY = lastBlockEndY + EMU_PER_PX; // immediately after the block
     unassigned.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
     for (const img of unassigned) {
-      if (img.newY1 !== currentY) {
+      if (img.newY1 !== currentY || img.x1 !== 0) {
         img.newY1 = currentY;
+        const originalWidth = img.x2 - img.x1;
+        img.x1 = 0;
+        img.x2 = originalWidth;
         moved++;
       }
       currentY += img.h + EMU_PER_PX;
@@ -1206,9 +1210,12 @@ function pushBelowContentSmart(
     // Move ALL images to the gap area, starting at column A.
     // Place at next available Y position, stacked vertically.
     const candidateY = Math.max(r.y1, nextAvailableY);
-    if (candidateY !== r.y1) {
+    if (candidateY !== r.y1 || r.x1 !== 0) {
       r.newY1 = candidateY;
-      // Preserve original horizontal position — don't force to column A.
+      // Force column A: set x1 to 0, x2 to width (preserving original width).
+      const originalWidth = r.x2 - r.x1;
+      r.x1 = 0;
+      r.x2 = originalWidth;
       moved++;
     }
     // The next image must start below this one.
