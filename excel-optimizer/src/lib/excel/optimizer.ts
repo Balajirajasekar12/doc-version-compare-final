@@ -217,21 +217,6 @@ export async function runOptimization(
       const ps = loaded.parsed.get(info.name);
       if (!ps) continue;
       const stats = await fixDrawingOverlaps(loaded.zip, ps, info.file);
-      // After fixDrawingOverlaps inserts rows, re-parse the modified XML
-      // so that extractSnapshot sees the shifted cells. Without this,
-      // the ParsedSheet still has the original cell positions.
-      if (stats.cellMapping && stats.cellMapping.size > 0) {
-        const updatedXml = await readEntryText(loaded.zip, info.file);
-        if (updatedXml) {
-          try {
-            const sharedStrings = await parseSharedStrings(loaded.zip);
-            const reParsed = parseSheet(updatedXml, sharedStrings);
-            loaded.parsed.set(info.name, reParsed);
-          } catch (e) {
-            debugLog.log('DRAWING', `re-parse failed for ${info.name}: ${e}`);
-          }
-        }
-      }
       if (ps.hasDrawing) {
         debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
@@ -269,18 +254,6 @@ export async function runOptimization(
     }
   });
 
-  // Diagnostic: verify modified XML is in the zip before save
-  for (const info of loaded.wb.sheets) {
-    if (!loaded.parsed.get(info.name)?.hasDrawing) continue;
-    const xml = await readEntryText(loaded.zip, info.file);
-    if (!xml) continue;
-    const cellCount = (xml.match(/<c\s/g) || []).length;
-    // Check if A211 exists (from TC01 A210 shift)
-    const hasA211 = xml.includes('r="A211"');
-    const hasA210 = xml.includes('r="A210"');
-    debugLog.log('ZIP_CHECK', `${info.file}: ${cellCount} cells, hasA210=${hasA210}, hasA211=${hasA211}`);
-  }
-
   let buffer = await saveZip(loaded.zip);
 
   // Phase: Reposition images using ExcelJS (the only library that produces
@@ -301,35 +274,7 @@ export async function runOptimization(
   // is stricter than the engine's own DOM parser. Any violation fails the run
   // — a bad file is never delivered.
   const freshZip = await loadZip(buffer);
-
-  // Diagnostic: check reloaded zip
-  for (const info of loaded.wb.sheets) {
-    if (!loaded.parsed.get(info.name)?.hasDrawing) continue;
-    const xml = await readEntryText(freshZip, info.file);
-    if (!xml) continue;
-    const cellCount = (xml.match(/<c\s/g) || []).length;
-    const hasA211 = xml.includes('r="A211"');
-    const hasA210 = xml.includes('r="A210"');
-    debugLog.log('RELOAD_CHECK', `${info.file}: ${cellCount} cells, hasA210=${hasA210}, hasA211=${hasA211}`);
-  }
-
   const afterSnapshot = await extractSnapshot(freshZip, loaded.wb.sheets);
-  // Diagnostic: log cellMapping details before validation
-  for (let i = 0; i < cellMappings.length; i++) {
-    for (const [sheetName, mapping] of cellMappings[i]) {
-      if (mapping.size > 0) {
-        debugLog.log('CELLMAP', `${sheetName}: ${mapping.size} mapped refs`);
-        // Show first 10 mappings
-        let count = 0;
-        for (const [oldRef, newRef] of mapping) {
-          if (count++ >= 10) break;
-          const beforeVal = session.beforeSnapshot.sheets[i]?.values[oldRef];
-          const afterVal = afterSnapshot.sheets[i]?.values[newRef];
-          debugLog.log('CELLMAP', `  ${oldRef} -> ${newRef}: before=${beforeVal ?? 'NONE'} after=${afterVal ?? 'NONE'} ${beforeVal === afterVal ? 'OK' : 'MISMATCH'}`);
-        }
-      }
-    }
-  }
   const validation = validateOutput(session.beforeSnapshot, afterSnapshot, cellMappings);
 
   // Content preservation check: compare cell counts per sheet

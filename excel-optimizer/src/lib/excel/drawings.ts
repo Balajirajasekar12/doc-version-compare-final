@@ -29,7 +29,7 @@ import {
   parseXml,
   textContent,
 } from "./xml";
-import { ParsedSheet, parseSheet } from "./worksheet";
+import { ParsedSheet, parseSheet, shiftSheetRows } from "./worksheet";
 import { debugLog } from "./debug-log";
 
 /**
@@ -765,6 +765,8 @@ async function placeImagesByBlock(
           );
           for (const [k, v] of newMapping) cellMapping.set(k, v);
           zip.file(sheetFile, newSheetXml);
+          // Keep the ParsedSheet DOM in sync with the modified XML.
+          shiftSheetRows(sheet, nextBlockTopRow, rowsNeeded);
 
           for (let j = b + 1; j < blocks.length; j++) {
             blocks[j].startRow += rowsNeeded;
