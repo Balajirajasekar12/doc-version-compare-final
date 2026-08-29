@@ -624,4 +624,23 @@ export function shiftSheetRows(
   if (sheet.maxRow >= insertAtRow) {
     sheet.maxRow += rowsToInsert;
   }
+
+  // 6. Update <c r="..."> attributes in the DOM to match the cellMapping.
+  // insertRowsInWorksheet already updated the XML string, but the DOM's
+  // <c> elements still have the old r attributes. Without this step,
+  // serializeSheet would write stale references (e.g. <c r="B11"> in
+  // <row r="19">) which the validator cannot match.
+  for (const [oldRef, newRef] of cellMapping) {
+    const rc = refToRC(oldRef);
+    if (!rc) continue;
+    const rowEl = sheet.rowByNum.get(rc.row);
+    if (!rowEl) continue;
+    for (const c of childElements(rowEl, 'c')) {
+      const r = getAttr(c, 'r');
+      if (r === oldRef) {
+        setAttr(c, 'r', newRef);
+        break;
+      }
+    }
+  }
 }
