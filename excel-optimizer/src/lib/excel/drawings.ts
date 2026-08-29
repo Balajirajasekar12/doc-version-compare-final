@@ -741,14 +741,17 @@ async function placeImagesByBlock(
       let imgBottomRow = imgTopRow + imgHeightRows - 1;
 
       // Check ALL subsequent content blocks — push image past any overlap.
-      for (let nb = b; nb < blocks.length; nb++) {
+      // Find the LAST block this image overlaps and push below it.
+      for (let nb = b + 1; nb < blocks.length; nb++) {
         const nextBlock = blocks[nb];
         const imgTopEmu = currentGeom.rowStart(imgTopRow - 1);
         const imgBottomEmu = imgTopEmu + img.h;
+        // Image overlaps this block if its bottom extends into the block's range
+        // AND its top is above the block's end.
         if (imgBottomEmu > nextBlock.startY && imgTopEmu < nextBlock.endY) {
-          // Image overlaps this block — push below it.
-          const rowsForBlockHeight = Math.max(1, Math.ceil((nextBlock.endY - nextBlock.startY) / avgRowH));
-          imgTopRow = nextBlock.endRow + rowsForBlockHeight + GAP_ROWS;
+          // Push below this block's END ROW + gap rows.
+          // Use the block's endRow (1-based) to calculate the correct EMU position.
+          imgTopRow = nextBlock.endRow + GAP_ROWS;
           imgBottomRow = imgTopRow + imgHeightRows - 1;
         }
       }
