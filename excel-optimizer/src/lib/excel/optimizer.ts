@@ -254,6 +254,18 @@ export async function runOptimization(
     }
   });
 
+  // Diagnostic: verify modified XML is in the zip before save
+  for (const info of loaded.wb.sheets) {
+    if (!loaded.parsed.get(info.name)?.hasDrawing) continue;
+    const xml = await readEntryText(loaded.zip, info.file);
+    if (!xml) continue;
+    const cellCount = (xml.match(/<c\s/g) || []).length;
+    // Check if A211 exists (from TC01 A210 shift)
+    const hasA211 = xml.includes('r="A211"');
+    const hasA210 = xml.includes('r="A210"');
+    debugLog.log('ZIP_CHECK', `${info.file}: ${cellCount} cells, hasA210=${hasA210}, hasA211=${hasA211}`);
+  }
+
   let buffer = await saveZip(loaded.zip);
 
   // Phase: Reposition images using ExcelJS (the only library that produces
@@ -274,6 +286,18 @@ export async function runOptimization(
   // is stricter than the engine's own DOM parser. Any violation fails the run
   // — a bad file is never delivered.
   const freshZip = await loadZip(buffer);
+
+  // Diagnostic: check reloaded zip
+  for (const info of loaded.wb.sheets) {
+    if (!loaded.parsed.get(info.name)?.hasDrawing) continue;
+    const xml = await readEntryText(freshZip, info.file);
+    if (!xml) continue;
+    const cellCount = (xml.match(/<c\s/g) || []).length;
+    const hasA211 = xml.includes('r="A211"');
+    const hasA210 = xml.includes('r="A210"');
+    debugLog.log('RELOAD_CHECK', `${info.file}: ${cellCount} cells, hasA210=${hasA210}, hasA211=${hasA211}`);
+  }
+
   const afterSnapshot = await extractSnapshot(freshZip, loaded.wb.sheets);
   // Diagnostic: log cellMapping details before validation
   for (let i = 0; i < cellMappings.length; i++) {
