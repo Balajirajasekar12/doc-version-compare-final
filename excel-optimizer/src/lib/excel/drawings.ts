@@ -710,63 +710,47 @@ async function placeImagesByBlock(
 
   debugLog.log("DRAWING", `  placeImagesByBlock: ${rects.length - alreadySafe.length} images overlap blocks, ${alreadySafe.length} already safe`);
 
-  // Step 2: Place each block's images right after that block, in document flow.
-  // Block A → Images A → Block B → Images B → ...
-  // NOTE: Row insertion deliberately omitted. It shifts cell references,
-  // formulas, and merges, causing "Value lost" validator errors.
-  // Images are placed at row coordinates via drawing anchors only.
-  // Excel renders images at any row without needing <row> elements.
+  // Step 2: Place overlapping images below content blocks, checking all blocks.
   let moved = 0;
   const currentGeom = geom;
-  const avgRowH = geom.defaultRowHeight * 12700; // EMU
-  const GAP_ROWS = 2; // empty rows between image and next content
+  const avgRowH = geom.defaultRowHeight * 12700;
+  const GAP_ROWS = 2;
 
   for (let b = 0; b < blocks.length; b++) {
     const images = blockImages[b];
     if (images.length === 0) continue;
-
-    // Sort images by original Y position.
     images.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
 
-    // Calculate where this block ends (row number) using current geometry.
     const blockEndRow = blocks[b].endRow;
-    // First image starts 1 row below the block's last content row.
-    let nextImageRow = blockEndRow + 1;
+    let nextRow = blockEndRow + 1;
 
-    // Place images stacked vertically at column A, tracking row positions.
     for (const img of images) {
-      // Calculate image height in rows (rounded up to ensure full coverage).
-      const imgHeightRows = Math.max(1, Math.ceil(img.h / avgRowH));
-      let imgTopRow = nextImageRow;
-      let imgBottomRow = imgTopRow + imgHeightRows - 1;
+      const imgHRows = Math.max(1, Math.ceil(img.h / avgRowH));
+      let topRow = nextRow;
 
-      // Check ALL subsequent content blocks — push image past any overlap.
-      // Find the LAST block this image overlaps and push below it.
-      for (let nb = b + 1; nb < blocks.length; nb++) {
-        const nextBlock = blocks[nb];
-        const imgTopEmu = currentGeom.rowStart(imgTopRow - 1);
-        const imgBottomEmu = imgTopEmu + img.h;
-        // Image overlaps this block if its bottom extends into the block's range
-        // AND its top is above the block's end.
-        if (imgBottomEmu > nextBlock.startY && imgTopEmu < nextBlock.endY) {
-          // Push below this block's END ROW + gap rows.
-          // Use the block's endRow (1-based) to calculate the correct EMU position.
-          imgTopRow = nextBlock.endRow + GAP_ROWS;
-          imgBottomRow = imgTopRow + imgHeightRows - 1;
+      // Push past any content block this image would overlap.
+      for (let pass = 0; pass < 20; pass++) {
+        const topEmu = currentGeom.rowStart(topRow - 1);
+        const botEmu = topEmu + img.h;
+        let pushed = false;
+        for (const blk of blocks) {
+          if (botEmu > blk.startY && topEmu < blk.endY) {
+            topRow = blk.endRow + GAP_ROWS;
+            pushed = true;
+            break;
+          }
         }
+        if (!pushed) break;
       }
 
-      // Place image at calculated position.
-      if (img.newY1 !== currentGeom.rowStart(imgTopRow - 1) || img.x1 !== 0) {
-        img.newY1 = currentGeom.rowStart(imgTopRow - 1);
-        const originalWidth = img.x2 - img.x1;
+      if (img.newY1 !== currentGeom.rowStart(topRow - 1) || img.x1 !== 0) {
+        img.newY1 = currentGeom.rowStart(topRow - 1);
         img.x1 = 0;
-        img.x2 = originalWidth;
+        img.x2 = img.x2 - img.x1;
         moved++;
       }
-      nextImageRow = imgBottomRow + 1;
+      nextRow = topRow + imgHRows;
     }
-    debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after block ${b}`);
   }
 
   // Also place unassigned images (those not assigned to any block) after the last block.
