@@ -539,4 +539,89 @@ export function serializeSheet(sheet: ParsedSheet): string {
  * Shift all rows and cells in the ParsedSheet DOM by `rowsToInsert` starting
  * from `insertAtRow`. This keeps the DOM, cell maps, formula maps, and merge
  * ranges in sync after insertRowsInWorksheet modifies the XML string.
- */
+ *
+ * Must be called BEFORE serializeSheet() so that the serialized XML reflects
+ * the inserted rows and shifted cell references.
+ */
+export function shiftSheetRows(
+  sheet: ParsedSheet,
+  insertAtRow: number,
+  rowsToInsert: number,
+  cellMapping: Map<string, string>,
+): void {
+  if (rowsToInsert <= 0) return;
+
+  // 1. Shift rowByNum entries: move rows >= insertAtRow to new positions
+  const shiftedRows = new Map<number, XmlEl>();
+  for (const [rowNum, rowEl] of sheet.rowByNum) {
+    if (rowNum >= insertAtRow) {
+      shiftedRows.set(rowNum + rowsToInsert, rowEl);
+      // Update the r="..." attribute on the <row> element
+      for (let i = 0; i < rowEl.attributes.length; i++) {
+        const attr = rowEl.attributes[i];
+        if (attr.localName === 'r' || attr.nodeName === 'r') {
+          rowEl.setAttribute('r', String(rowNum + rowsToInsert));
+          break;
+        }
+      }
+    }
+  }
+  // Add shifted entries to rowByNum and remove old ones
+  for (const [newRow, rowEl] of shiftedRows) {
+    sheet.rowByNum.set(newRow, rowEl);
+  }
+  for (const oldRow of shiftedRows.keys()) {
+    sheet.rowByNum.delete(oldRow);
+  }
+
+  // 2. Shift cells map: move cells at rows >= insertAtRow
+  const shiftedCells = new Map<number, Map<number, CellData>>();
+  for (const [row, colMap] of sheet.cells) {
+    if (row >= insertAtRow) {
+      shiftedCells.set(row + rowsToInsert, colMap);
+    }
+  }
+  for (const [newRow, colMap] of shiftedCells) {
+    sheet.cells.set(newRow, colMap);
+  }
+  for (const oldRow of shiftedCells.keys()) {
+    sheet.cells.delete(oldRow);
+  }
+
+  // 3. Rebuild formulaMap and valueMap using cellMapping
+  const newFormulaMap = new Map<string, string>();
+  const newValueMap = new Map<string, string>();
+  for (const [ref, formula] of sheet.formulaMap) {
+    const newRef = cellMapping.get(ref);
+    if (newRef) {
+      newFormulaMap.set(newRef, formula);
+    } else {
+      newFormulaMap.set(ref, formula);
+    }
+  }
+  for (const [ref, value] of sheet.valueMap) {
+    const newRef = cellMapping.get(ref);
+    if (newRef) {
+      newValueMap.set(newRef, value);
+    } else {
+      newValueMap.set(ref, value);
+    }
+  }
+  sheet.formulaMap = newFormulaMap;
+  sheet.valueMap = newValueMap;
+
+  // 4. Shift merge ranges
+  for (const merge of sheet.merges) {
+    if (merge.row1 >= insertAtRow) merge.row1 += rowsToInsert;
+    if (merge.row2 >= insertAtRow) merge.row2 += rowsToInsert;
+    // Update ref string
+    const colStart = String.fromCharCode(64 + merge.col1);
+    const colEnd = String.fromCharCode(64 + merge.col2);
+    merge.ref = `${colStart}${merge.row1}:${colEnd}${merge.row2}`;
+  }
+
+  // 5. Update maxRow
+  if (sheet.maxRow >= insertAtRow) {
+    sheet.maxRow += rowsToInsert;
+  }
+}

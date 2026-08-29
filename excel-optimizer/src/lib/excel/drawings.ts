@@ -29,7 +29,7 @@ import {
   parseXml,
   textContent,
 } from "./xml";
-import { ParsedSheet, parseSheet } from "./worksheet";
+import { ParsedSheet, parseSheet, shiftSheetRows } from "./worksheet";
 import { debugLog } from "./debug-log";
 
 /**
@@ -187,6 +187,8 @@ export interface AnchorRect {
   h: number;
   /** Index in the original anchor list (for matching back to XML). */
   index: number;
+  /** Whether this image was repositioned by the placement algorithm. */
+  repositioned?: boolean;
 }
 
 export interface AnchorInfo {
@@ -599,14 +601,15 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
     gaps.push(sorted[i] - sorted[i - 1]);
   }
 
-  // Adaptive gap threshold: use median gap × 1.5, clamped to [3, 20].
-  // This handles:
-  //   - Dense tables (median gap = 1): threshold = 3 (min)
-  //   - Mixed content (median gap = 5): threshold = 7-8
-  //   - Sparse documents (median gap = 15): threshold = 20 (max)
+  // Adaptive gap threshold: use median gap × 1.5, clamped to [3, 5].
+  // CAP AT 5 to prevent merging separate content blocks that are 10-15
+  // rows apart (e.g., "For Testing" labels at rows 106, 118, 128, 139).
+  // A threshold of 5 correctly:
+  //   - Merges consecutive table rows (gap=1) into one block
+  //   - Keeps scattered content labels (gap≥6) as separate blocks
   const sortedGaps = [...gaps].sort((a, b) => a - b);
   const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)];
-  const adaptiveGap = Math.max(3, Math.min(20, Math.ceil(medianGap * 1.5)));
+  const adaptiveGap = Math.max(3, Math.min(5, Math.ceil(medianGap * 1.5)));
 
   debugLog.log("DRAWING", `findAllContentBlocks: ${sorted.length} content rows, medianGap=${medianGap}, adaptiveGap=${adaptiveGap}`);
 
@@ -615,7 +618,7 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
   let blockEnd = sorted[0];
 
   for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i] - blockEnd > adaptiveGap) {
+    if (sorted[i] - blockEnd >= adaptiveGap) {
       blocks.push({
         startRow: blockStart,
         endRow: blockEnd,
@@ -636,17 +639,13 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
   debugLog.log("DRAWING", `findAllContentBlocks: ${blocks.length} blocks detected`);
   return blocks;
 }
-
 /**
- * Assigns each image to the content block it overlaps, then places each
- * group of images immediately after its respective block.
+ * Places images that overlap content blocks into the nearest gap after
+ * that block. Images that don't overlap any content are left untouched.
  *
- * If images for a block extend into the next block, rows are inserted to
- * push subsequent content down, preserving document flow:
- *
- *   Block A → Images A → Block B → Images B → Block C → ...
- *
- * Returns the number of images that were repositioned.
+ * Key: only inserts rows when the TOTAL height of all images for a block
+ * would overflow into the next content block. This prevents cascading
+ * row insertions that push screenprints far from their original positions.
  */
 async function placeImagesByBlock(
   rects: AnchorRect[],
@@ -659,119 +658,124 @@ async function placeImagesByBlock(
 ): Promise<number> {
   if (rects.length === 0 || blocks.length === 0) return 0;
 
-  // Step 1: Classify each image as overlapping a block, or already safe.
-  // An image is "safe" if it's below ALL content blocks and not overlapping anything.
+  const avgRowH = geom.defaultRowHeight * 12700;
+  const GAP_ROWS = 2;
+
+  // Step 1: Assign each image to a block using edge-based detection.
+  // An image overlaps a block if ANY part of it touches the block's row range.
+  // This catches images positioned at block boundaries (e.g., screenprints
+  // at the same row as a content label).
   const blockImages: AnchorRect[][] = blocks.map(() => []);
-  const unassigned: AnchorRect[] = [];
-  const alreadySafe: AnchorRect[] = [];
-
-  const lastBlockEndY = blocks.length > 0 ? blocks[blocks.length - 1].endY : 0;
-
   for (const r of rects) {
-    const imgStartY = r.y1;
-    const imgEndY = r.y1 + r.h;
-
-    // Check if image overlaps any content block.
-    let overlapsBlock = false;
+    const imgFromRow = geom.yToRow(r.y1).row;
+    const imgBottomRow = geom.yToRow(r.y1 + r.h).row;
+    let assigned = false;
     for (let b = 0; b < blocks.length; b++) {
-      const block = blocks[b];
-      // Strict overlap: image must actually intersect the block's vertical range.
-      // Use image midpoint for assignment — the block whose range contains the
-      // image's center gets the image.
-      const imgMidY = (imgStartY + imgEndY) / 2;
-      if (imgMidY >= block.startY && imgMidY <= block.endY + SPACING_PX * EMU_PER_PX) {
+      if (imgFromRow <= blocks[b].endRow && imgBottomRow >= blocks[b].startRow) {
         blockImages[b].push(r);
-        overlapsBlock = true;
+        assigned = true;
         break;
-      }
-    }
-
-    if (!overlapsBlock) {
-      // Image doesn't midpoint-overlap any block.
-      // Check if the FULL image intersects ANY block.
-      let fullOverlapBlock = -1;
-      for (let b = 0; b < blocks.length; b++) {
-        const block = blocks[b];
-        // Full overlap: image's vertical extent intersects block's range.
-        if (imgStartY <= block.endY && imgEndY >= block.startY) {
-          fullOverlapBlock = b;
-          break;
-        }
-      }
-      if (fullOverlapBlock >= 0) {
-        // Image overlaps a block — assign to it.
-        blockImages[fullOverlapBlock].push(r);
-      } else {
-        // Image doesn't overlap ANY block — it's already safe, leave it alone.
-        alreadySafe.push(r);
       }
     }
   }
 
-  debugLog.log("DRAWING", `  placeImagesByBlock: ${rects.length - alreadySafe.length} images overlap blocks, ${alreadySafe.length} already safe`);
-
-  // Step 2: Place overlapping images below content blocks, checking all blocks.
+  // Step 2: For each block, check if ALL its images fit in the gap.
+  // Only insert rows ONCE if the total height overflows.
   let moved = 0;
-  const currentGeom = geom;
-  const avgRowH = geom.defaultRowHeight * 12700;
-  const GAP_ROWS = 2;
+  let currentGeom = geom;
+  let totalRowsInserted = 0;
+  // Track all row insertions so we can adjust non-repositioned images later.
+  const rowInsertions: Array<{ atRow: number; count: number }> = [];
 
   for (let b = 0; b < blocks.length; b++) {
     const images = blockImages[b];
     if (images.length === 0) continue;
     images.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
 
-    const blockEndRow = blocks[b].endRow;
-    let nextRow = blockEndRow + 1;
+    const adjBlockEndRow = blocks[b].endRow + totalRowsInserted;
+    const nextBlockIdx = b + 1;
 
+    let totalImgHeight = 0;
     for (const img of images) {
-      const imgHRows = Math.max(1, Math.ceil(img.h / avgRowH));
-      let topRow = nextRow;
-
-      // Push past any content block this image would overlap.
-      for (let pass = 0; pass < 20; pass++) {
-        const topEmu = currentGeom.rowStart(topRow - 1);
-        const botEmu = topEmu + img.h;
-        let pushed = false;
-        for (const blk of blocks) {
-          if (botEmu > blk.startY && topEmu < blk.endY) {
-            topRow = blk.endRow + GAP_ROWS;
-            pushed = true;
-            break;
-          }
-        }
-        if (!pushed) break;
-      }
-
-      if (img.newY1 !== currentGeom.rowStart(topRow - 1) || img.x1 !== 0) {
-        img.newY1 = currentGeom.rowStart(topRow - 1);
-        img.x1 = 0;
-        img.x2 = img.x2 - img.x1;
-        moved++;
-      }
-      nextRow = topRow + imgHRows;
+      totalImgHeight += img.h + SPACING_PX * EMU_PER_PX;
     }
-  }
 
-  // Also place unassigned images (those not assigned to any block) after the last block.
-  if (unassigned.length > 0) {
-    const lastBlock = blocks[blocks.length - 1];
-    let currentY = currentGeom.rowStart(lastBlock.endRow) + EMU_PER_PX;
-    unassigned.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
-    for (const img of unassigned) {
-      if (img.newY1 !== currentY || img.x1 !== 0) {
-        img.newY1 = currentY;
-        const originalWidth = img.x2 - img.x1;
+    const gapStartY = currentGeom.rowStart(adjBlockEndRow);
+    const stackBottomY = gapStartY + totalImgHeight;
+
+    if (nextBlockIdx < blocks.length) {
+      const nextAdjStartRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+      const nextBlockStartY = currentGeom.rowStart(nextAdjStartRow);
+      const gapBuffer = GAP_ROWS * avgRowH;
+
+      if (stackBottomY >= nextBlockStartY - gapBuffer) {
+        const overlapEmu = stackBottomY - (nextBlockStartY - gapBuffer);
+        const overlapRows = Math.ceil(overlapEmu / avgRowH) + GAP_ROWS;
+        const insertAtRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+
+        const sheetXml = await readEntryText(zip, sheetFile);
+        if (sheetXml && typeof sheetXml === 'string') {
+          const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
+            sheetXml, insertAtRow, overlapRows,
+          );
+          zip.file(sheetFile, newXml);
+          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+          currentGeom = new DrawingGeometry(sheet);
+          totalRowsInserted += overlapRows;
+          rowInsertions.push({ atRow: blocks[nextBlockIdx].startRow, count: overlapRows });
+          debugLog.log('DRAWING', '  inserted ' + overlapRows + ' rows at row ' + insertAtRow);
+        }
+      }
+    }
+
+    let nextY = currentGeom.rowStart(adjBlockEndRow) + SPACING_PX * EMU_PER_PX;
+    let lastImgBottomY = nextY;
+    for (const img of images) {
+      if (nextY !== img.y1 || img.x1 !== 0) {
+        img.newY1 = nextY;
+        const originalWidth = img.w;
         img.x1 = 0;
         img.x2 = originalWidth;
+        img.repositioned = true;
         moved++;
       }
-      currentY += img.h + EMU_PER_PX;
+      nextY += img.h + SPACING_PX * EMU_PER_PX;
+      lastImgBottomY = nextY;
+    }
+
+    // After placing images, check if the last image extends past the next block.
+    // If so, insert rows to push the next block down.
+    if (nextBlockIdx < blocks.length) {
+      const nextAdjRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+      const nextBlockStartY = currentGeom.rowStart(nextAdjRow);
+      const gapBuffer = GAP_ROWS * avgRowH;
+      if (lastImgBottomY >= nextBlockStartY - gapBuffer) {
+        const overlapEmu = lastImgBottomY - (nextBlockStartY - gapBuffer);
+        const overlapRows = Math.ceil(overlapEmu / avgRowH) + GAP_ROWS;
+        const insertAtRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+        const sheetXml = await readEntryText(zip, sheetFile);
+        if (sheetXml && typeof sheetXml === 'string') {
+          const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
+            sheetXml, insertAtRow, overlapRows,
+          );
+          zip.file(sheetFile, newXml);
+          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+          currentGeom = new DrawingGeometry(sheet);
+          totalRowsInserted += overlapRows;
+          rowInsertions.push({ atRow: blocks[nextBlockIdx].startRow, count: overlapRows });
+          debugLog.log('DRAWING', '  post-place inserted ' + overlapRows + ' rows at row ' + insertAtRow);
+        }
+      }
     }
   }
 
   return moved;
 }
+
+
+
 
 export async function fixDrawingOverlaps(
   zip: Zip,
@@ -980,27 +984,24 @@ export async function fixDrawingOverlaps(
   //   - images within the same block that weren't separated
   //   - test cases without content blocks
   // Run the safety pass on ALL images to ensure no overlaps remain.
+  // Safety pass: resolve remaining overlaps.
+  // First pass: spread repositioned images away from non-repositioned.
+  // Second pass: spread non-repositioned images among themselves.
+  // Final pass: resolve any remaining cross-group overlaps.
   const remainingOverlaps = countOverlaps(rects);
   if (remainingOverlaps > 0) {
     debugLog.log("DRAWING", `  ${remainingOverlaps} overlaps remain after placement, running safety pass`);
-    spreadRects(rects);
-  }
-  // Final safety pass: push any remaining overlapping images down.
-  const finalOverlapCheck = countOverlaps(rects);
-  if (finalOverlapCheck > 0) {
-    const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
-    const placed: AnchorRect[] = [];
-    for (const r of ordered) {
-      let y = r.newY1;
-      for (let attempt = 0; attempt < 50; attempt++) {
-        const blockers = placed.filter(
-          (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.newY1 < y + r.h && p.newY1 + p.h > y,
-        );
-        if (blockers.length === 0) break;
-        y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
-      }
-      r.newY1 = y;
-      placed.push(r);
+    const repositioned = rects.filter(r => r.repositioned);
+    const nonRepositioned = rects.filter(r => !r.repositioned);
+    if (repositioned.length > 0 && nonRepositioned.length > 0) {
+      spreadRects(repositioned, nonRepositioned);
+      spreadRects(nonRepositioned, repositioned);
+    } else {
+      spreadRects(rects);
+    }
+    // Final cleanup: resolve any remaining overlaps across all images.
+    if (countOverlaps(rects) > 0) {
+      spreadRects(rects);
     }
   }
 
@@ -1046,15 +1047,22 @@ export async function fixDrawingOverlaps(
     // Build position map: each anchor is identified by its embedId + fromRow/col
     // to handle multiple anchors sharing the same r:embed.
     const embedIdToNewPos = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number; fromCol: number; fromColOff: number }>();
+    // Check if row insertions happened (writeBackGeom differs from geom).
+    const hasRowInsertions = writeBackGeom !== geom;
     for (const rect of rects) {
-      const originalX1 = rect.x2 - rect.w;
-      if (rect.newY1 === rect.y1 && rect.x1 === originalX1) continue;
+      // When row insertions occurred, only update repositioned images.
+      // Non-repositioned images keep original XML row values because their
+      // EMU positions are based on original geometry.
+      // When NO row insertions occurred, update all moved images.
+      if (hasRowInsertions && !rect.repositioned) continue;
       const anchor = allAnchors[rect.index];
       if (!anchor) continue;
-      const fromPos = writeBackGeom.yToRow(rect.newY1);
+      // Use writeBackGeom for repositioned images.
+      const geomForAnchor = writeBackGeom;
+      const fromPos = geomForAnchor.yToRow(rect.newY1);
       const fromRowOff = Math.max(0, Math.round(fromPos.off));
       const newY2 = rect.newY1 + rect.h;
-      const toPos = writeBackGeom.yToRow(newY2);
+      const toPos = geomForAnchor.yToRow(newY2);
       const toRowOff = Math.max(0, Math.round(toPos.off));
       // Use embedId + original row as unique key to handle multiple anchors
       // sharing the same r:embed.
@@ -1063,7 +1071,7 @@ export async function fixDrawingOverlaps(
       embedIdToNewPos.set(key, {
         fromRow: fromPos.row, fromRowOff,
         toRow: toPos.row, toRowOff,
-        newY: Math.round(rect.newY1),
+        newY: Math.round(geomForAnchor.rowStart(fromPos.row - 1) + fromPos.off),
         fromCol: 0, fromColOff: 0,
       });
     }
@@ -1387,15 +1395,17 @@ function groupAndArrange(
  * Pushes overlapping rects down (keeping x and size); returns moved count.
  * This handles any remaining overlaps after grouping.
  */
-function spreadRects(rects: AnchorRect[]): number {
+function spreadRects(rects: AnchorRect[], staticBlockers?: AnchorRect[]): number {
   const ordered = [...rects].sort((a, b) => a.newY1 - b.newY1 || a.x1 - b.x1);
   const placed: AnchorRect[] = [];
   let moved = 0;
   for (const r of ordered) {
     let y = r.newY1;
     for (;;) {
-      const blockers = placed.filter(
-        (p) => p.x1 < r.x2 && p.x2 > r.x1 && p.newY1 < y + r.h && p.newY1 + p.h > y,
+      // Check against both already-placed movable images AND static blockers.
+      const allBlockers = staticBlockers ? [...placed, ...staticBlockers] : placed;
+      const blockers = allBlockers.filter(
+        (p) => p !== r && p.x1 < r.x2 && p.x2 > r.x1 && p.newY1 < y + r.h && p.newY1 + p.h > y,
       );
       if (blockers.length === 0) break;
       y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
@@ -1682,6 +1692,17 @@ class DrawingGeometry {
     const limit = Math.min(maxRow + 200, 50_000);
     this._ensureRowCache(limit);
     this._ensureColCache(256); // 256 columns covers all practical sheets
+  }
+
+  /** Rebuild all caches from scratch after the sheet DOM has been modified
+   *  (e.g. after row insertion via shiftSheetRows). */
+  rebuild(): void {
+    this._rowEmuCache = [];
+    this._rowStartCache = [0];
+    this._maxCachedRow = 0;
+    const maxRow = this.sheet.maxRow || this.sheet.cells.size || 200;
+    const limit = Math.min(maxRow + 200, 50_000);
+    this._ensureRowCache(limit);
   }
 
   private _ensureRowCache(upTo: number): void {
