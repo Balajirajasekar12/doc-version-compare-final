@@ -292,8 +292,19 @@ function insertRowsInWorksheet(
   const cellMapping = new Map<string, string>(); // old ref -> new ref
   let result = worksheetXml;
 
-  // Update row numbers: <row r="N"> where N >= insertAtRow -> N + rowsToInsert
-  // Process from bottom to top to avoid index invalidation.
+  // Helper: shift all cell references in a string by rowsToInsert if row >= insertAtRow.
+  // Matches: A1, $A$1, $A1, A$1, A1:B5, $A$1:$B$5, etc.
+  function shiftRefs(s: string): string {
+    return s.replace(/(\$?)([A-Za-z]{1,3})(\$?)(\d+)/g, (match, d1, col, d2, rowNumStr) => {
+      const rowNum = parseInt(rowNumStr);
+      if (rowNum >= insertAtRow) {
+        return `${d1}${col}${d2}${rowNum + rowsToInsert}`;
+      }
+      return match;
+    });
+  }
+
+  // 1. Update row numbers: <row r="N"> where N >= insertAtRow -> N + rowsToInsert
   const rowRegex = /<row\s[^>]*\br="(\d+)"/g;
   const rowMatches: Array<{ start: number; end: number; rowNum: number }> = [];
   let m;
@@ -303,7 +314,6 @@ function insertRowsInWorksheet(
       rowMatches.push({ start: m.index, end: m.index + m[0].length, rowNum });
     }
   }
-  // Process bottom to top.
   for (let i = rowMatches.length - 1; i >= 0; i--) {
     const match = rowMatches[i];
     const newRowNum = match.rowNum + rowsToInsert;
@@ -315,7 +325,7 @@ function insertRowsInWorksheet(
       result.substring(match.end);
   }
 
-  // Update cell references: <c r="A123"> where row >= insertAtRow
+  // 2. Update cell references: <c r="A123"> where row >= insertAtRow
   const cellRegex = /<c\s[^>]*\br="([A-Z]+)(\d+)"/g;
   const cellMatches: Array<{ start: number; end: number; col: string; rowNum: number }> = [];
   while ((m = cellRegex.exec(result)) !== null) {
@@ -336,7 +346,37 @@ function insertRowsInWorksheet(
       result.substring(match.end);
   }
 
-  debugLog.log("DRAWING", `insertRowsInWorksheet: inserted ${rowsToInsert} rows at row ${insertAtRow}`);
+  // 3. Update formula text inside <f> elements.
+  // Formulas contain cell references like SUM(A1:A99) that must be shifted.
+  result = result.replace(/(<f[^>]*>)(.*?)(<\/f>)/g, (_match, open, formulaText, close) => {
+    return open + shiftRefs(formulaText) + close;
+  });
+
+  // 4. Update merge cell ranges: <mergeCell ref="A1:B5"/>
+  result = result.replace(/(<mergeCell[^>]*ref=")(.*?)(")/g, (_match, prefix, ref, suffix) => {
+    return prefix + shiftRefs(ref) + suffix;
+  });
+
+  // 5. Update data validation formulas: <dataValidation ...sqref="...">
+  //    and <formula1>, <formula2> inside dataValidation.
+  result = result.replace(/(<dataValidation[^>]*sqref=")(.*?)(")/g, (_match, prefix, sqref, suffix) => {
+    return prefix + shiftRefs(sqref) + suffix;
+  });
+  result = result.replace(/(<formula[12]>)(.*?)(<\/formula[12]>)/g, (_match, open, formulaText, close) => {
+    return open + shiftRefs(formulaText) + close;
+  });
+
+  // 6. Update conditional formatting sqref: <conditionalFormatting sqref="A1:B5">
+  result = result.replace(/(<conditionalFormatting[^>]*sqref=")(.*?)(")/g, (_match, prefix, sqref, suffix) => {
+    return prefix + shiftRefs(sqref) + suffix;
+  });
+
+  // 7. Update autoFilter ref: <autoFilter ref="A1:B100"/>
+  result = result.replace(/(<autoFilter[^>]*ref=")(.*?)(")/g, (_match, prefix, ref, suffix) => {
+    return prefix + shiftRefs(ref) + suffix;
+  });
+
+  debugLog.log("DRAWING", `insertRowsInWorksheet: inserted ${rowsToInsert} rows at row ${insertAtRow} (updated cells, formulas, merges, validations)`);
   return { xml: result, cellMapping };
 }
 
@@ -675,13 +715,13 @@ async function placeImagesByBlock(
   // When images extend into or are too close to the next block, rows are
   // inserted to push content down, preserving document flow.
   //
-  // NOTE: Row insertion removed — Excel displays images at any row position
-  // without needing explicit <row> elements. Inserting rows shifts all cell
-  // references and triggers false "Value lost" errors in the validator.
-  // Images are placed in the gap between content blocks; if the gap is too
-  // small, images extend beyond it but Excel still renders them correctly.
+  // GLOBAL RULE: there must always be at least MIN_GAP_ROWS empty rows
+  // between the last image's visual bottom and the next content block.
+  // insertRowsInWorksheet now properly updates formulas, merge cells,
+  // data validation, and conditional formatting so no "Value lost" errors occur.
+  const MIN_GAP_ROWS = 2;
   let moved = 0;
-  const currentGeom = geom;
+  let currentGeom = geom;
   const avgRowH = geom.defaultRowHeight * 12700; // EMU
 
   for (let b = 0; b < blocks.length; b++) {
@@ -713,6 +753,41 @@ async function placeImagesByBlock(
       nextImageRow = lastImageBottomRow + 1;
     }
     debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after rows ${blockEndRow}, last image ends at row ${lastImageBottomRow}`);
+
+    // Check gap to the next content block.
+    if (b + 1 < blocks.length) {
+      const nextBlockTopRow = blocks[b + 1].startRow;
+      const gapRows = nextBlockTopRow - lastImageBottomRow - 1;
+
+      if (gapRows < MIN_GAP_ROWS) {
+        const insertAtRow = lastImageBottomRow + 1 + MIN_GAP_ROWS;
+        const rowsNeeded = insertAtRow - nextBlockTopRow;
+        if (rowsNeeded > 0) {
+          const { xml: newSheetXml, cellMapping: newMapping } = insertRowsInWorksheet(
+            await readEntryText(zip, sheetFile) || '',
+            nextBlockTopRow,
+            rowsNeeded,
+          );
+          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          zip.file(sheetFile, newSheetXml);
+
+          for (let j = b + 1; j < blocks.length; j++) {
+            blocks[j].startRow += rowsNeeded;
+            blocks[j].endRow += rowsNeeded;
+          }
+
+          const modifiedSheetXml = await readEntryText(zip, sheetFile);
+          if (modifiedSheetXml && typeof modifiedSheetXml === "string") {
+            try {
+              const modifiedSheet = parseSheet(modifiedSheetXml, []);
+              currentGeom = new DrawingGeometry(modifiedSheet);
+            } catch { /* fall back */ }
+          }
+
+          debugLog.log("DRAWING", `  inserted ${rowsNeeded} rows at row ${nextBlockTopRow} (gap was ${gapRows}, needed ${MIN_GAP_ROWS})`);
+        }
+      }
+    }
   }
 
   // Also place unassigned images (those not assigned to any block) after the last block.
