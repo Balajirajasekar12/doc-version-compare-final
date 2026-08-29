@@ -29,7 +29,7 @@ import {
   parseXml,
   textContent,
 } from "./xml";
-import { ParsedSheet, parseSheet, shiftSheetRows } from "./worksheet";
+import { ParsedSheet, parseSheet } from "./worksheet";
 import { debugLog } from "./debug-log";
 
 /**
