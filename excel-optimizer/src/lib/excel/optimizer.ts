@@ -217,6 +217,13 @@ export async function runOptimization(
       const ps = loaded.parsed.get(info.name);
       if (!ps) continue;
       const stats = await fixDrawingOverlaps(loaded.zip, ps, info.file);
+      // Re-serialize the sheet back to the zip if rows were inserted,
+      // because fixDrawingOverlaps may have called shiftSheetRows which
+      // updated the in-memory DOM but the zip still has the old XML.
+      if (stats.cellMapping && stats.cellMapping.size > 0) {
+        loaded.zip.file(psSheetFile(loaded, info.name), serializeSheet(ps));
+        debugLog.log('DRAWING', `${info.name}: re-serialized after ${stats.cellMapping.size} cell remappings`);
+      }
       if (ps.hasDrawing) {
         debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
