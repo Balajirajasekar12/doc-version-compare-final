@@ -411,6 +411,9 @@ export function validateOutput(
             diffs.push(`Value changed at "${b.name}"!${ref} (moved to ${mappedRef})`);
           }
         } else {
+          const mappedRef = sheetMapping.get(ref);
+          const afterValAtMapped = mappedRef ? a.values[mappedRef] : undefined;
+          console.log(`[DVC-VAL] Value lost "${b.name}"!${ref}="${val}" | mappedRef=${mappedRef ?? 'NONE'} afterValAtMapped=${afterValAtMapped ?? 'NONE'} sheetMapping.size=${sheetMapping.size} afterRef=${afterRef} afterVals.has(afterRef)=${a.values[afterRef] !== undefined}`);
           diffs.push(`Value lost at "${b.name}"!${ref}`);
         }
       } else if (

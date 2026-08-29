@@ -275,6 +275,22 @@ export async function runOptimization(
   // — a bad file is never delivered.
   const freshZip = await loadZip(buffer);
   const afterSnapshot = await extractSnapshot(freshZip, loaded.wb.sheets);
+  // Diagnostic: log cellMapping details before validation
+  for (let i = 0; i < cellMappings.length; i++) {
+    for (const [sheetName, mapping] of cellMappings[i]) {
+      if (mapping.size > 0) {
+        debugLog.log('CELLMAP', `${sheetName}: ${mapping.size} mapped refs`);
+        // Show first 10 mappings
+        let count = 0;
+        for (const [oldRef, newRef] of mapping) {
+          if (count++ >= 10) break;
+          const beforeVal = session.beforeSnapshot.sheets[i]?.values[oldRef];
+          const afterVal = afterSnapshot.sheets[i]?.values[newRef];
+          debugLog.log('CELLMAP', `  ${oldRef} -> ${newRef}: before=${beforeVal ?? 'NONE'} after=${afterVal ?? 'NONE'} ${beforeVal === afterVal ? 'OK' : 'MISMATCH'}`);
+        }
+      }
+    }
+  }
   const validation = validateOutput(session.beforeSnapshot, afterSnapshot, cellMappings);
 
   // Content preservation check: compare cell counts per sheet
