@@ -1049,45 +1049,30 @@ export async function fixDrawingOverlaps(
     // Check if row insertions happened (writeBackGeom differs from geom).
     const hasRowInsertions = writeBackGeom !== geom;
     for (const rect of rects) {
+      // When row insertions occurred, only update repositioned images.
+      // Non-repositioned images keep original XML row values because their
+      // EMU positions are based on original geometry.
+      // When NO row insertions occurred, update all moved images.
+      if (hasRowInsertions && !rect.repositioned) continue;
       const anchor = allAnchors[rect.index];
       if (!anchor) continue;
+      // Use writeBackGeom for repositioned images.
+      const geomForAnchor = writeBackGeom;
+      const fromPos = geomForAnchor.yToRow(rect.newY1);
+      const fromRowOff = Math.max(0, Math.round(fromPos.off));
+      const newY2 = rect.newY1 + rect.h;
+      const toPos = geomForAnchor.yToRow(newY2);
+      const toRowOff = Math.max(0, Math.round(toPos.off));
       // Use embedId + original row as unique key to handle multiple anchors
       // sharing the same r:embed.
       const origRow = intOf(firstChildElement(firstChildElement(allAnchors[rect.index].anchor, 'from')!, 'row')!);
       const key = `${anchor.embedId}@r${origRow}`;
-
-      if (hasRowInsertions && !rect.repositioned) {
-        // Non-repositioned image: keep original row positions but force column A.
-        // Read the original row/col values from the anchor XML.
-        const origFromEl = firstChildElement(allAnchors[rect.index].anchor, 'from');
-        const origToEl = firstChildElement(allAnchors[rect.index].anchor, 'to');
-        if (origFromEl) {
-          const origFromRow = intOf(firstChildElement(origFromEl, 'row'));
-          const origFromRowOff = intOf(firstChildElement(origFromEl, 'rowOff'));
-          const origToRow = origToEl ? intOf(firstChildElement(origToEl, 'row')) : origFromRow + 10;
-          const origToRowOff = origToEl ? intOf(firstChildElement(origToEl, 'rowOff')) : 0;
-          embedIdToNewPos.set(key, {
-            fromRow: origFromRow, fromRowOff: origFromRowOff,
-            toRow: origToRow, toRowOff: origToRowOff,
-            newY: rect.y1,
-            fromCol: 0, fromColOff: 0,
-          });
-        }
-      } else {
-        // Repositioned image (or no row insertions): compute new row from geom.
-        const geomForAnchor = writeBackGeom;
-        const fromPos = geomForAnchor.yToRow(rect.newY1);
-        const fromRowOff = Math.max(0, Math.round(fromPos.off));
-        const newY2 = rect.newY1 + rect.h;
-        const toPos = geomForAnchor.yToRow(newY2);
-        const toRowOff = Math.max(0, Math.round(toPos.off));
-        embedIdToNewPos.set(key, {
-          fromRow: fromPos.row, fromRowOff,
-          toRow: toPos.row, toRowOff,
-          newY: Math.round(geomForAnchor.rowStart(fromPos.row - 1) + fromPos.off),
-          fromCol: 0, fromColOff: 0,
-        });
-      }
+      embedIdToNewPos.set(key, {
+        fromRow: fromPos.row, fromRowOff,
+        toRow: toPos.row, toRowOff,
+        newY: Math.round(geomForAnchor.rowStart(fromPos.row - 1) + fromPos.off),
+        fromCol: 0, fromColOff: 0,
+      });
     }
     debugLog.log("DRAWING", `  embedIdToNewPos size=${embedIdToNewPos.size}`);
     const modifiedXml = updateAnchorsString(originalXml, embedIdToNewPos);
