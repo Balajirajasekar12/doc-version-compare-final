@@ -674,7 +674,6 @@ async function placeImagesByBlock(
   // Block A → Images A → Block B → Images B → ...
   // When images extend into the next block, insert rows to push content down.
   let moved = 0;
-  let cumulativeRowInsert = 0; // track rows inserted so far (for row insertion offset)
   let currentGeom = geom; // geometry updated after each row insertion
   const avgRowH = geom.defaultRowHeight * 12700; // EMU
 
@@ -714,7 +713,9 @@ async function placeImagesByBlock(
         const overlapEmu = imagesBottomY - nextBlockTopY + avgRowH; // 1 row margin
         const rowsNeeded = Math.ceil(overlapEmu / avgRowH);
         if (rowsNeeded > 0) {
-          const insertAtRow = blocks[b + 1].startRow + cumulativeRowInsert;
+          // NOTE: Do NOT add cumulativeRowInsert here — blocks[j].startRow is already
+          // updated to include all previous insertions (see the loop below).
+          const insertAtRow = blocks[b + 1].startRow;
           const { xml: newSheetXml, cellMapping: newMapping } = insertRowsInWorksheet(
             await readEntryText(zip, sheetFile) || '',
             insertAtRow,
@@ -724,7 +725,6 @@ async function placeImagesByBlock(
           for (const [k, v] of newMapping) cellMapping.set(k, v);
           // Write updated sheet XML back to zip.
           zip.file(sheetFile, newSheetXml);
-          cumulativeRowInsert += rowsNeeded;
 
           // Update subsequent blocks' row numbers to account for insertion.
           for (let j = b + 1; j < blocks.length; j++) {
@@ -1658,6 +1658,14 @@ class DrawingGeometry {
   private defaultColWidth: number;
   public defaultRowHeight: number;
 
+  // Performance caches: precomputed prefix sums for O(1) lookups.
+  private _rowEmuCache: number[] = [];
+  private _rowStartCache: number[] = []; // prefix sum: _rowStartCache[i] = sum of rowEmu(0..i-1)
+  private _maxCachedRow = 0;
+  private _colEmuCache: number[] = [];
+  private _colStartCache: number[] = [];
+  private _maxCachedCol = 0;
+
   constructor(sheet: ParsedSheet) {
     this.sheet = sheet;
     const fmt = firstChildElement(sheet.root, "sheetFormatPr");
@@ -1665,6 +1673,59 @@ class DrawingGeometry {
     const drh = fmt ? parseFloat(getAttr(fmt, "defaultRowHeight") ?? "") : NaN;
     this.defaultColWidth = isNaN(dcw) ? DEFAULT_COL_WIDTH : dcw;
     this.defaultRowHeight = isNaN(drh) ? DEFAULT_ROW_HEIGHT : drh;
+    // Precompute caches up to maxRow + 200 (buffer for image heights).
+    // Handle undefined/NaN maxRow (e.g. from mock sheets in tests).
+    const maxRow = sheet.maxRow || sheet.cells.size || 200;
+    const limit = Math.min(maxRow + 200, 50_000);
+    this._ensureRowCache(limit);
+    this._ensureColCache(256); // 256 columns covers all practical sheets
+  }
+
+  private _ensureRowCache(upTo: number): void {
+    if (upTo <= this._maxCachedRow) return;
+    const start = this._maxCachedRow;
+    if (start === 0) {
+      this._rowEmuCache = [];
+      this._rowStartCache = [0]; // _rowStartCache[0] = 0 (sum of 0 rows)
+    }
+    let acc = this._rowStartCache[this._rowStartCache.length - 1] ?? 0;
+    for (let r = start; r < upTo; r++) {
+      const rowEl = this.sheet.rowByNum.get(r + 1);
+      let pt = this.defaultRowHeight;
+      if (rowEl) {
+        const ht = parseFloat(getAttr(rowEl, "ht") ?? "");
+        if (!isNaN(ht) && ht > 0) pt = ht;
+      }
+      const emu = pt * 12700;
+      this._rowEmuCache.push(emu);
+      acc += emu;
+      this._rowStartCache.push(acc);
+    }
+    this._maxCachedRow = upTo;
+  }
+
+  private _ensureColCache(upTo: number): void {
+    if (upTo <= this._maxCachedCol) return;
+    const start = this._maxCachedCol;
+    if (start === 0) {
+      this._colEmuCache = [];
+      this._colStartCache = [0];
+    }
+    let acc = this._colStartCache[this._colStartCache.length - 1] ?? 0;
+    for (let c = start; c < upTo; c++) {
+      let width = this.defaultColWidth;
+      for (const spec of this.sheet.cols) {
+        if (c + 1 >= spec.min && c + 1 <= spec.max) {
+          if (spec.width !== undefined) width = spec.width;
+          break;
+        }
+      }
+      const emu = (width * 7 + 5) * EMU_PER_PX;
+      this._colEmuCache.push(emu);
+      acc += emu;
+      this._colStartCache.push(acc);
+    }
+    this._maxCachedCol = upTo;
   }
 
   parseAnchor(el: XmlEl): AnchorRect | null {
@@ -1707,67 +1768,58 @@ class DrawingGeometry {
     return null;
   }
 
-  /** EMU width of column `col` (0-based). */
+  /** EMU width of column `col` (0-based). Uses cached prefix sum. */
   private colEmu(col: number): number {
-    let width = this.defaultColWidth;
-    for (const spec of this.sheet.cols) {
-      if (col + 1 >= spec.min && col + 1 <= spec.max) {
-        if (spec.width !== undefined) width = spec.width;
-        break;
-      }
-    }
-    return (width * 7 + 5) * EMU_PER_PX;
+    this._ensureColCache(col + 1);
+    return this._colEmuCache[col] ?? (this.defaultColWidth * 7 + 5) * EMU_PER_PX;
   }
 
-  /** EMU height of row `row` (0-based). */
+  /** EMU height of row `row` (0-based). Uses cached prefix sum. */
   public rowEmu(row: number): number {
-    // rowByNum uses 1-based keys (from XML <row r="N">), but geometry
-    // iterates with 0-based indices.  Look up r+1 so that internal index 0
-    // maps to XML row 1, internal index 1 to XML row 2, etc.
-    const rowEl = this.sheet.rowByNum.get(row + 1);
-    let pt = this.defaultRowHeight;
-    if (rowEl) {
-      const ht = parseFloat(getAttr(rowEl, "ht") ?? "");
-      if (!isNaN(ht) && ht > 0) pt = ht;
-    }
-    return pt * 12700;
+    this._ensureRowCache(row + 1);
+    return this._rowEmuCache[row] ?? this.defaultRowHeight * 12700;
   }
 
   private colStart(col: number): number {
-    let acc = 0;
-    for (let c = 0; c < col; c++) acc += this.colEmu(c);
-    return acc;
+    this._ensureColCache(col + 1);
+    return this._colStartCache[col] ?? 0;
   }
 
   public rowStart(row: number): number {
-    let acc = 0;
-    for (let r = 0; r < row; r++) acc += this.rowEmu(r);
-    return acc;
+    this._ensureRowCache(row + 1);
+    return this._rowStartCache[row] ?? 0;
   }
 
   /** Converts an EMU y position back to (row, rowOff) with rowOff ≥ 0.
-   *  Returns 1-based row number suitable for writing to OOXML. */
+   *  Returns 1-based row number suitable for writing to OOXML.
+   *  Uses binary search on cached prefix sums for O(log n) performance. */
   public yToRow(y: number): { row: number; off: number } {
-    let acc = 0;
-    for (let r = 0; r < 200_000; r++) {
-      const h = this.rowEmu(r);
-      if (y < acc + h) return { row: r + 1, off: y - acc };
-      acc += h;
+    // Ensure cache covers enough rows. Estimate: y / minRowHeight.
+    const estimatedRow = Math.ceil(y / (10 * 12700)) + 100;
+    this._ensureRowCache(Math.max(estimatedRow, this._maxCachedRow));
+    // Binary search: find the LARGEST index where _rowStartCache[idx] <= y.
+    let lo = 0;
+    let hi = this._rowStartCache.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1; // upper mid to avoid infinite loop
+      if (this._rowStartCache[mid] <= y) lo = mid;
+      else hi = mid - 1;
     }
-    return { row: 1, off: 0 };
+    return { row: lo + 1, off: Math.max(0, y - this._rowStartCache[lo]) };
   }
 
   /** Converts EMU (x, y) back to (col, row) for diagnostics. */
   public emuToRC(x: number, y: number): { col: number; row: number } {
     const { row } = this.yToRow(y);
-    // For columns, iterate similarly.
-    let acc = 0;
-    for (let c = 0; c < 1000; c++) {
-      const w = this.colEmu(c);
-      if (x < acc + w) return { col: c, row };
-      acc += w;
+    this._ensureColCache(256);
+    let lo = 0;
+    let hi = this._colStartCache.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this._colStartCache[mid] <= x) lo = mid;
+      else hi = mid - 1;
     }
-    return { col: 0, row };
+    return { col: lo, row };
   }
 }
 
