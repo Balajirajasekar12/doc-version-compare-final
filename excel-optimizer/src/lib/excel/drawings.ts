@@ -672,7 +672,14 @@ async function placeImagesByBlock(
 
   // Step 2: Place each block's images right after that block, in document flow.
   // Block A → Images A → Block B → Images B → ...
-  // When images extend into the next block, insert rows to push content down.
+  // When images extend into or are too close to the next block, rows are
+  // inserted to push content down, preserving document flow.
+  //
+  // GLOBAL RULE: there must always be at least MIN_GAP_ROWS empty rows
+  // between the last image's visual bottom and the next content block.
+  // This prevents slight visual overlap caused by images not clipping to
+  // row boundaries in Excel.
+  const MIN_GAP_ROWS = 2;
   let moved = 0;
   let currentGeom = geom; // geometry updated after each row insertion
   const avgRowH = geom.defaultRowHeight * 12700; // EMU
@@ -684,41 +691,48 @@ async function placeImagesByBlock(
     // Sort images by original Y position.
     images.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
 
-    // Calculate where this block ends (EMU) using current geometry.
-    const blockEndY = currentGeom.rowStart(blocks[b].endRow);
-    // Start placing images 1px below the block.
-    let currentY = blockEndY + EMU_PER_PX;
+    // Calculate where this block ends (row number) using current geometry.
+    const blockEndRow = blocks[b].endRow;
+    // First image starts 1 row below the block's last content row.
+    let nextImageRow = blockEndRow + 1;
 
-    // Place images stacked vertically at column A.
-    let imagesBottomY = currentY; // bottom of the last image placed
+    // Place images stacked vertically at column A, tracking row positions.
+    let lastImageBottomRow = nextImageRow; // row where the last image ends
     for (const img of images) {
-      if (img.newY1 !== currentY || img.x1 !== 0) {
-        img.newY1 = currentY;
+      // Calculate image height in rows (rounded up to ensure full coverage).
+      const imgHeightRows = Math.max(1, Math.ceil(img.h / avgRowH));
+
+      if (img.newY1 !== currentGeom.rowStart(nextImageRow - 1) || img.x1 !== 0) {
+        img.newY1 = currentGeom.rowStart(nextImageRow - 1);
         const originalWidth = img.x2 - img.x1;
         img.x1 = 0;
         img.x2 = originalWidth;
         moved++;
       }
-      imagesBottomY = currentY + img.h;
-      currentY += img.h + EMU_PER_PX;
+      lastImageBottomRow = nextImageRow + imgHeightRows - 1;
+      nextImageRow = lastImageBottomRow + 1;
     }
-    debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after rows ${blocks[b].startRow}-${blocks[b].endRow}`);
+    debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after rows ${blockEndRow}, last image ends at row ${lastImageBottomRow}`);
 
-    // Check if images extend into the next content block.
+    // Check gap to the next content block.
     if (b + 1 < blocks.length) {
-      // The next block's top (EMU) using current (possibly updated) geometry.
-      const nextBlockTopY = currentGeom.rowStart(blocks[b + 1].startRow - 1);
-      if (imagesBottomY > nextBlockTopY) {
-        // Images extend into the next block — insert rows to push it down.
-        const overlapEmu = imagesBottomY - nextBlockTopY + avgRowH; // 1 row margin
-        const rowsNeeded = Math.ceil(overlapEmu / avgRowH);
+      // nextBlockTopRow is the first content row of the next block.
+      // After previous insertions, this row number is already updated.
+      const nextBlockTopRow = blocks[b + 1].startRow;
+      // Empty rows between last image bottom and next content top.
+      const gapRows = nextBlockTopRow - lastImageBottomRow - 1;
+
+      if (gapRows < MIN_GAP_ROWS) {
+        // Not enough gap — insert rows to create MIN_GAP_ROWS of clearance.
+        // The new content row should be at: lastImageBottomRow + 1 + MIN_GAP_ROWS
+        // So we need to insert at: lastImageBottomRow + 1 + MIN_GAP_ROWS
+        // which pushes the current nextBlockTopRow to that position.
+        const insertAtRow = lastImageBottomRow + 1 + MIN_GAP_ROWS;
+        const rowsNeeded = insertAtRow - nextBlockTopRow;
         if (rowsNeeded > 0) {
-          // NOTE: Do NOT add cumulativeRowInsert here — blocks[j].startRow is already
-          // updated to include all previous insertions (see the loop below).
-          const insertAtRow = blocks[b + 1].startRow;
           const { xml: newSheetXml, cellMapping: newMapping } = insertRowsInWorksheet(
             await readEntryText(zip, sheetFile) || '',
-            insertAtRow,
+            nextBlockTopRow,
             rowsNeeded,
           );
           // Merge cell mappings.
@@ -743,7 +757,7 @@ async function placeImagesByBlock(
             }
           }
 
-          debugLog.log("DRAWING", `  inserted ${rowsNeeded} rows at row ${insertAtRow} to push content down`);
+          debugLog.log("DRAWING", `  inserted ${rowsNeeded} rows at row ${nextBlockTopRow} (gap was ${gapRows}, needed ${MIN_GAP_ROWS})`);
         }
       }
     }
@@ -752,8 +766,7 @@ async function placeImagesByBlock(
   // Also place unassigned images (those not assigned to any block) after the last block.
   if (unassigned.length > 0) {
     const lastBlock = blocks[blocks.length - 1];
-    const lastBlockEndY = currentGeom.rowStart(lastBlock.endRow);
-    let currentY = lastBlockEndY + EMU_PER_PX; // immediately after the block
+    let currentY = currentGeom.rowStart(lastBlock.endRow) + EMU_PER_PX;
     unassigned.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
     for (const img of unassigned) {
       if (img.newY1 !== currentY || img.x1 !== 0) {
