@@ -712,16 +712,13 @@ async function placeImagesByBlock(
 
   // Step 2: Place each block's images right after that block, in document flow.
   // Block A → Images A → Block B → Images B → ...
-  // When images extend into or are too close to the next block, rows are
-  // inserted to push content down, preserving document flow.
-  //
-  // GLOBAL RULE: there must always be at least MIN_GAP_ROWS empty rows
-  // between the last image's visual bottom and the next content block.
-  // insertRowsInWorksheet now properly updates formulas, merge cells,
-  // data validation, and conditional formatting so no "Value lost" errors occur.
-  const MIN_GAP_ROWS = 2;
+  // NOTE: Row insertion deliberately omitted. Inserting rows into the
+  // worksheet XML shifts all cell references, formulas, merges, and
+  // validation rules, causing "Value lost" validator errors.
+  // Excel renders images at any row position without <row> elements,
+  // so images extend into the gap visually — no structural change needed.
   let moved = 0;
-  let currentGeom = geom;
+  const currentGeom = geom;
   const avgRowH = geom.defaultRowHeight * 12700; // EMU
 
   for (let b = 0; b < blocks.length; b++) {
@@ -754,40 +751,6 @@ async function placeImagesByBlock(
     }
     debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after rows ${blockEndRow}, last image ends at row ${lastImageBottomRow}`);
 
-    // Check gap to the next content block.
-    if (b + 1 < blocks.length) {
-      const nextBlockTopRow = blocks[b + 1].startRow;
-      const gapRows = nextBlockTopRow - lastImageBottomRow - 1;
-
-      if (gapRows < MIN_GAP_ROWS) {
-        const insertAtRow = lastImageBottomRow + 1 + MIN_GAP_ROWS;
-        const rowsNeeded = insertAtRow - nextBlockTopRow;
-        if (rowsNeeded > 0) {
-          const { xml: newSheetXml, cellMapping: newMapping } = insertRowsInWorksheet(
-            await readEntryText(zip, sheetFile) || '',
-            nextBlockTopRow,
-            rowsNeeded,
-          );
-          for (const [k, v] of newMapping) cellMapping.set(k, v);
-          zip.file(sheetFile, newSheetXml);
-
-          for (let j = b + 1; j < blocks.length; j++) {
-            blocks[j].startRow += rowsNeeded;
-            blocks[j].endRow += rowsNeeded;
-          }
-
-          const modifiedSheetXml = await readEntryText(zip, sheetFile);
-          if (modifiedSheetXml && typeof modifiedSheetXml === "string") {
-            try {
-              const modifiedSheet = parseSheet(modifiedSheetXml, []);
-              currentGeom = new DrawingGeometry(modifiedSheet);
-            } catch { /* fall back */ }
-          }
-
-          debugLog.log("DRAWING", `  inserted ${rowsNeeded} rows at row ${nextBlockTopRow} (gap was ${gapRows}, needed ${MIN_GAP_ROWS})`);
-        }
-      }
-    }
   }
 
   // Also place unassigned images (those not assigned to any block) after the last block.
