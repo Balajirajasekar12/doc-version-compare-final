@@ -5,12 +5,12 @@
  *   Original upload → temp in-memory working copy → analyze → optimize copy →
  *   validate → generate final file. The user's file is never modified.
  */
-import { LoadedWorkbook, WorkbookSnapshot, extractSnapshot, loadWorkbook, parseSharedStrings } from "./analyzer";
+import { LoadedWorkbook, WorkbookSnapshot, extractSnapshot, loadWorkbook } from "./analyzer";
 import { emptyCounters, formatSheet } from "./format";
 import { fixDrawingOverlaps, type ImageOptimizationStats } from "./drawings";
 import { syncTableColumnNames } from "./tables";
 import { loadZip, saveZip, Zip, readEntryText, listEntries } from "./zip";
-import { serializeSheet, parseSheet } from "./worksheet";
+import { serializeSheet } from "./worksheet";
 import { checkNativeWellFormed, checkPartAttributes, checkPartStructure, snapshotStats, validateOutput } from "./validator";
 import { convertXls } from "./xls";
 // import { repositionImages } from "./image-reposition"; // DISABLED: regex-based XML modification corrupts drawing XML — fixDrawingOverlaps handles this correctly
