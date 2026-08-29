@@ -1060,17 +1060,19 @@ export async function fixDrawingOverlaps(
         // Non-repositioned image: keep original row positions but force column A.
         // Read the original row/col values from the anchor XML.
         const origFromEl = firstChildElement(allAnchors[rect.index].anchor, 'from');
-        const origFromRow = intOf(firstChildElement(origFromEl!, 'row')!);
-        const origFromRowOff = intOf(firstChildElement(origFromEl!, 'rowOff')!);
         const origToEl = firstChildElement(allAnchors[rect.index].anchor, 'to');
-        const origToRow = intOf(firstChildElement(origToEl!, 'row')!);
-        const origToRowOff = intOf(firstChildElement(origToEl!, 'rowOff')!);
-        embedIdToNewPos.set(key, {
-          fromRow: origFromRow, fromRowOff: origFromRowOff,
-          toRow: origToRow, toRowOff: origToRowOff,
-          newY: rect.y1,
-          fromCol: 0, fromColOff: 0,
-        });
+        if (origFromEl) {
+          const origFromRow = intOf(firstChildElement(origFromEl, 'row'));
+          const origFromRowOff = intOf(firstChildElement(origFromEl, 'rowOff'));
+          const origToRow = origToEl ? intOf(firstChildElement(origToEl, 'row')) : origFromRow + 10;
+          const origToRowOff = origToEl ? intOf(firstChildElement(origToEl, 'rowOff')) : 0;
+          embedIdToNewPos.set(key, {
+            fromRow: origFromRow, fromRowOff: origFromRowOff,
+            toRow: origToRow, toRowOff: origToRowOff,
+            newY: rect.y1,
+            fromCol: 0, fromColOff: 0,
+          });
+        }
       } else {
         // Repositioned image (or no row insertions): compute new row from geom.
         const geomForAnchor = writeBackGeom;
