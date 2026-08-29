@@ -719,6 +719,7 @@ async function placeImagesByBlock(
   let moved = 0;
   const currentGeom = geom;
   const avgRowH = geom.defaultRowHeight * 12700; // EMU
+  const GAP_ROWS = 2; // empty rows between image and next content
 
   for (let b = 0; b < blocks.length; b++) {
     const images = blockImages[b];
@@ -733,24 +734,36 @@ async function placeImagesByBlock(
     let nextImageRow = blockEndRow + 1;
 
     // Place images stacked vertically at column A, tracking row positions.
-    let lastImageBottomRow = nextImageRow; // row where the last image ends
     for (const img of images) {
       // Calculate image height in rows (rounded up to ensure full coverage).
       const imgHeightRows = Math.max(1, Math.ceil(img.h / avgRowH));
+      let imgTopRow = nextImageRow;
+      let imgBottomRow = imgTopRow + imgHeightRows - 1;
 
-      if (img.newY1 !== currentGeom.rowStart(nextImageRow - 1) || img.x1 !== 0) {
-        img.newY1 = currentGeom.rowStart(nextImageRow - 1);
+      // Check ALL subsequent content blocks — push image past any overlap.
+      for (let nb = b; nb < blocks.length; nb++) {
+        const nextBlock = blocks[nb];
+        const imgTopEmu = currentGeom.rowStart(imgTopRow - 1);
+        const imgBottomEmu = imgTopEmu + img.h;
+        if (imgBottomEmu > nextBlock.startY && imgTopEmu < nextBlock.endY) {
+          // Image overlaps this block — push below it.
+          const rowsForBlockHeight = Math.max(1, Math.ceil((nextBlock.endY - nextBlock.startY) / avgRowH));
+          imgTopRow = nextBlock.endRow + rowsForBlockHeight + GAP_ROWS;
+          imgBottomRow = imgTopRow + imgHeightRows - 1;
+        }
+      }
+
+      // Place image at calculated position.
+      if (img.newY1 !== currentGeom.rowStart(imgTopRow - 1) || img.x1 !== 0) {
+        img.newY1 = currentGeom.rowStart(imgTopRow - 1);
         const originalWidth = img.x2 - img.x1;
         img.x1 = 0;
         img.x2 = originalWidth;
         moved++;
       }
-      lastImageBottomRow = nextImageRow + imgHeightRows - 1;
-      nextImageRow = lastImageBottomRow + 1;
+      nextImageRow = imgBottomRow + 1;
     }
-    debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after rows ${blockEndRow}, last image ends at row ${lastImageBottomRow}`);
-
-
+    debugLog.log("DRAWING", `  block ${b}: placed ${images.length} images after block ${b}`);
   }
 
   // Also place unassigned images (those not assigned to any block) after the last block.
