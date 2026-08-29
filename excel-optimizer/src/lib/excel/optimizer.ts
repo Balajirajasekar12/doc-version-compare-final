@@ -5,12 +5,12 @@
  *   Original upload → temp in-memory working copy → analyze → optimize copy →
  *   validate → generate final file. The user's file is never modified.
  */
-import { LoadedWorkbook, WorkbookSnapshot, extractSnapshot, loadWorkbook } from "./analyzer";
+import { LoadedWorkbook, WorkbookSnapshot, extractSnapshot, loadWorkbook, parseSharedStrings } from "./analyzer";
 import { emptyCounters, formatSheet } from "./format";
 import { fixDrawingOverlaps, type ImageOptimizationStats } from "./drawings";
 import { syncTableColumnNames } from "./tables";
 import { loadZip, saveZip, Zip, readEntryText, listEntries } from "./zip";
-import { serializeSheet } from "./worksheet";
+import { serializeSheet, parseSheet } from "./worksheet";
 import { checkNativeWellFormed, checkPartAttributes, checkPartStructure, snapshotStats, validateOutput } from "./validator";
 import { convertXls } from "./xls";
 // import { repositionImages } from "./image-reposition"; // DISABLED: regex-based XML modification corrupts drawing XML — fixDrawingOverlaps handles this correctly
@@ -217,6 +217,21 @@ export async function runOptimization(
       const ps = loaded.parsed.get(info.name);
       if (!ps) continue;
       const stats = await fixDrawingOverlaps(loaded.zip, ps, info.file);
+      // After fixDrawingOverlaps inserts rows, re-parse the modified XML
+      // so that extractSnapshot sees the shifted cells. Without this,
+      // the ParsedSheet still has the original cell positions.
+      if (stats.cellMapping && stats.cellMapping.size > 0) {
+        const updatedXml = await readEntryText(loaded.zip, info.file);
+        if (updatedXml) {
+          try {
+            const sharedStrings = await parseSharedStrings(loaded.zip);
+            const reParsed = parseSheet(updatedXml, sharedStrings);
+            loaded.parsed.set(info.name, reParsed);
+          } catch (e) {
+            debugLog.log('DRAWING', `re-parse failed for ${info.name}: ${e}`);
+          }
+        }
+      }
       if (ps.hasDrawing) {
         debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
