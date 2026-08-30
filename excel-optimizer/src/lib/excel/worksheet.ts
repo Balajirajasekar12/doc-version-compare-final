@@ -591,7 +591,7 @@ export function shiftSheetRows(
   // 3. Rebuild formulaMap and valueMap using cellMapping
   const newFormulaMap = new Map<string, string>();
   const newValueMap = new Map<string, string>();
-  for (const [ref, formula] of sheet.formulaMap) {
+  for (const [ref, formula] of (sheet.formulaMap || new Map())) {
     const newRef = cellMapping.get(ref);
     if (newRef) {
       newFormulaMap.set(newRef, formula);
@@ -599,7 +599,7 @@ export function shiftSheetRows(
       newFormulaMap.set(ref, formula);
     }
   }
-  for (const [ref, value] of sheet.valueMap) {
+  for (const [ref, value] of (sheet.valueMap || new Map())) {
     const newRef = cellMapping.get(ref);
     if (newRef) {
       newValueMap.set(newRef, value);
@@ -611,7 +611,7 @@ export function shiftSheetRows(
   sheet.valueMap = newValueMap;
 
   // 4. Shift merge ranges
-  for (const merge of sheet.merges) {
+  for (const merge of (sheet.merges || [])) {
     if (merge.row1 >= insertAtRow) merge.row1 += rowsToInsert;
     if (merge.row2 >= insertAtRow) merge.row2 += rowsToInsert;
     // Update ref string
