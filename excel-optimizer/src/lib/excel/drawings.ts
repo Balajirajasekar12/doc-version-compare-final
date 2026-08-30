@@ -703,7 +703,7 @@ async function placeImagesByBlock(
   if (rects.length === 0 || blocks.length === 0) return 0;
 
   const avgRowH = geom.defaultRowHeight * 12700;
-  const GAP_ROWS = 0;
+  const GAP_ROWS = 1;
 
   // Step 1: Assign each image to a block using center-based detection.
   // An image overlaps a block if its CENTER point is inside the block's row range.
@@ -760,7 +760,13 @@ async function placeImagesByBlock(
             sheetXml, insertAtRow, overlapRows,
           );
           zip.file(sheetFile, newXml);
-          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          // Compose cell mappings: resolve chains so original refs map to final refs.
+          for (const [k, v] of newMapping) {
+            for (const [orig, mapped] of cellMapping) {
+              if (mapped === k) cellMapping.set(orig, v);
+            }
+            cellMapping.set(k, v);
+          }
           shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
           currentGeom = new DrawingGeometry(sheet);
           totalRowsInserted += overlapRows;
@@ -799,14 +805,18 @@ async function placeImagesByBlock(
         if (sheetXml && typeof sheetXml === 'string') {
           const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
             sheetXml, insertAtRow, overlapRows,
-          );
-          zip.file(sheetFile, newXml);
-          for (const [k, v] of newMapping) cellMapping.set(k, v);
-          shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
-          currentGeom = new DrawingGeometry(sheet);
-          totalRowsInserted += overlapRows;
-          rowInsertions.push({ atRow: blocks[nextBlockIdx].startRow, count: overlapRows });
-          debugLog.log('DRAWING', '  post-place inserted ' + overlapRows + ' rows at row ' + insertAtRow);
+          );           zip.file(sheetFile, newXml);
+           for (const [k, v] of newMapping) {
+             for (const [orig, mapped] of cellMapping) {
+               if (mapped === k) cellMapping.set(orig, v);
+             }
+             cellMapping.set(k, v);
+           }
+           shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+           currentGeom = new DrawingGeometry(sheet);
+           totalRowsInserted += overlapRows;
+           rowInsertions.push({ atRow: blocks[nextBlockIdx].startRow, count: overlapRows });
+           debugLog.log('DRAWING', '  post-place inserted ' + overlapRows + ' rows at row ' + insertAtRow);
         }
       }    }
   }
@@ -882,10 +892,14 @@ async function placeImagesByBlock(
 
           const sheetXml = await readEntryText(zip, sheetFile);
           if (sheetXml && typeof sheetXml === 'string') {
-            const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(sheetXml, insertAtRow, overlapRows);
-            zip.file(sheetFile, newXml);
-            for (const [k, v] of newMapping) cellMapping.set(k, v);
-            shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+            const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(sheetXml, insertAtRow, overlapRows);             zip.file(sheetFile, newXml);
+             for (const [k, v] of newMapping) {
+               for (const [orig, mapped] of cellMapping) {
+                 if (mapped === k) cellMapping.set(orig, v);
+               }
+               cellMapping.set(k, v);
+             }
+             shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
             currentGeom = new DrawingGeometry(sheet);
             totalRowsInserted += overlapRows;
             rowInsertions.push({ atRow: insertAtRow, count: overlapRows });
