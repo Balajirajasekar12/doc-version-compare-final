@@ -217,11 +217,15 @@ export async function runOptimization(
       const ps = loaded.parsed.get(info.name);
       if (!ps) continue;
       const stats = await fixDrawingOverlaps(loaded.zip, ps, info.file);
-      // NOTE: Do NOT re-serialize the sheet here. fixDrawingOverlaps already
-      // writes the correct XML (with shifted cell references) to the zip via
-      // insertRowsInWorksheet. The in-memory DOM's cell r attributes are NOT
-      // updated by shiftSheetRows, so serializeSheet would produce XML with
-      // old unshifted cell references, corrupting the output.
+      // Re-serialize the sheet ONLY when no row insertion happened.
+      // When insertRowsInWorksheet ran, it already wrote correct XML (with
+      // shifted cell refs) to the zip — serializeSheet would overwrite it
+      // with stale DOM cell references. But when no row insertion happened,
+      // other DOM changes (e.g. table column casing) still need serialization.
+      const hadRowInsertions = stats.cellMapping && stats.cellMapping.size > 0;
+      if (!hadRowInsertions) {
+        loaded.zip.file(psSheetFile(loaded, info.name), serializeSheet(ps));
+      }
       if (ps.hasDrawing) {
         debugLog.log('DRAWING', `${info.name}: hasDrawing=true, images=${stats.imagesBefore}, overlaps=${stats.overlapsBefore}→${stats.overlapsAfter}, repositioned=${stats.imagesRepositioned}`);
       }
