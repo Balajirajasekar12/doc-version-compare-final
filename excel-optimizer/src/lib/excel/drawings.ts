@@ -284,12 +284,57 @@ function normalizeRelTarget(dir: string, target: string): string {
  * For each row element with row number >= insertAtRow, the row number
  * is incremented by rowsToInsert. Cell references are also updated.
  */
+/**
+ * Checks if worksheet XML contains complex structures that would be
+ * corrupted by row insertion (pivot tables, charts, conditional formatting,
+ * data validations, table parts, slicers, etc.).
+ *
+ * Row insertion uses regex-based XML manipulation which can break these
+ * complex nested structures. When detected, we skip row insertion and
+ * use EMU-based repositioning instead.
+ */
+function hasComplexWorksheetStructures(worksheetXml: string): boolean {
+  // Pivot table / cache references
+  if (/<pivotTable/i.test(worksheetXml)) return true;
+  if (/<pivotCacheDefinition/i.test(worksheetXml)) return true;
+  
+  // Charts
+  if (/<chart/i.test(worksheetXml)) return true;
+  
+  // Slicers
+  if (/<slicer/i.test(worksheetXml)) return true;
+  
+  // Tables (structured references)
+  if (/<tableParts/i.test(worksheetXml)) return true;
+  
+  // Complex data validation with formulas
+  if (/<dataValidation[^>]*>/i.test(worksheetXml)) {
+    // Count data validations - more than 5 likely indicates complex validation
+    const matches = worksheetXml.match(/<dataValidation/gi);
+    if (matches && matches.length > 5) return true;
+  }
+  
+  // Conditional formatting with complex rules
+  if (/<conditionalFormatting/i.test(worksheetXml)) {
+    const matches = worksheetXml.match(/<conditionalFormatting/gi);
+    if (matches && matches.length > 10) return true;
+  }
+  
+  return false;
+}
+
 function insertRowsInWorksheet(
   worksheetXml: string,
   insertAtRow: number,
   rowsToInsert: number,
 ): { xml: string; cellMapping: Map<string, string> } {
   if (rowsToInsert <= 0) return { xml: worksheetXml, cellMapping: new Map() };
+  
+  // Safety check: skip row insertion if complex structures detected
+  if (hasComplexWorksheetStructures(worksheetXml)) {
+    debugLog.log('DRAWING', `  insertRowsInWorksheet: SKIPPED - complex structures detected (pivot tables, charts, etc.)`);
+    return { xml: worksheetXml, cellMapping: new Map() };
+  }
 
   const cellMapping = new Map<string, string>(); // old ref -> new ref
   let result = worksheetXml;
@@ -646,35 +691,6 @@ function findAllContentBlocks(sheet: ParsedSheet, geom: DrawingGeometry): Conten
  * would overflow into the next content block. This prevents cascading
  * row insertions that push screenprints far from their original positions.
  */
-/**
- * Shifts drawing anchor rows in the XML string by the given offset
- * for anchors whose original row >= insertAtRow.
- */
-function shiftDrawingAnchorRows(
-  drawingXml: string,
-  insertAtRow: number,
-  rowsToShift: number,
-): string {
-  if (rowsToShift <= 0) return drawingXml;
-  // Match <row>N</row> tags and shift if N >= insertAtRow
-  return drawingXml.replace(/<(\w+:)?row>(\d+)<\/(\w+:)?row>/g, (_match, pfx1, rowNumStr, pfx2) => {
-    const rowNum = parseInt(rowNumStr);
-    if (rowNum >= insertAtRow) {
-      return `<${pfx1 || ''}row>${rowNum + rowsToShift}</${pfx2 || pfx1 || ''}row>`;
-    }
-    return _match;
-  });
-}
-
-/**
- * Places images that overlap content blocks into the nearest gap after
- * that block. Images that don't overlap any content are left untouched.
- *
- * CRITICAL: Row insertions shift cell content but NOT drawing anchors.
- * After inserting rows, we must also shift the drawing anchor row values
- * in the XML for non-repositioned images, so screenprints that were
- * positioned after content blocks stay after those blocks.
- */
 async function placeImagesByBlock(
   rects: AnchorRect[],
   blocks: ContentBlock[],
@@ -683,122 +699,209 @@ async function placeImagesByBlock(
   zip: Zip,
   sheetFile: string,
   cellMapping: Map<string, string>,
-): Promise<{ moved: number; insertions: Array<{ blockIdx: number; rows: number }>; totalRowsInserted: number; blocks: ContentBlock[] }> {
-  if (rects.length === 0 || blocks.length === 0) return { moved: 0, insertions: [], totalRowsInserted: 0, blocks };
+): Promise<number> {
+  if (rects.length === 0 || blocks.length === 0) return 0;
 
   const avgRowH = geom.defaultRowHeight * 12700;
-  const GAP_ROWS = 2;
+  const GAP_ROWS = 0;
 
-  // ═══ PHASE 1: Pre-compute block assignments from ORIGINAL positions ═══
-  // Use EDGE-based detection: an image is assigned to a block if ANY part
-  // of it overlaps the block's row range. This ensures screenprint copies
-  // that sit on top of content rows get reassigned below that content.
+  // Step 1: Assign each image to a block using center-based detection.
+  // An image overlaps a block if its CENTER point is inside the block's row range.
+  // This avoids false assignments at block boundaries (e.g., screenprints
+  // positioned just at the edge of a content label).
   const blockImages: AnchorRect[][] = blocks.map(() => []);
   for (const r of rects) {
-    const imgFromRow = geom.yToRow(r.y1).row;
-    const imgBottomRow = geom.yToRow(r.y1 + r.h).row;
-    let assigned = false;
+    const imgCenterRow = geom.yToRow(r.y1 + r.h / 2).row;
     for (let b = 0; b < blocks.length; b++) {
-      if (imgFromRow <= blocks[b].endRow && imgBottomRow >= blocks[b].startRow) {
+      if (imgCenterRow >= blocks[b].startRow && imgCenterRow <= blocks[b].endRow) {
         blockImages[b].push(r);
-        assigned = true;
-        debugLog.log('DRAWING', `  image #${r.index}: rows=${imgFromRow}-${imgBottomRow} → block ${b} (rows ${blocks[b].startRow}-${blocks[b].endRow})`);
         break;
       }
     }
-    if (!assigned) debugLog.log('DRAWING', `  image #${r.index}: rows=${imgFromRow}-${imgBottomRow} → NO BLOCK`);
   }
 
-  // ═══ PHASE 2: Compute ALL needed row insertions ═══
-  const insertionsNeeded: Array<{ blockIdx: number; rows: number }> = [];
-  let cumulativeInsert = 0;
+  // Step 2: For each block, check if ALL its images fit in the gap.
+  // Only insert rows ONCE if the total height overflows.
+  let moved = 0;
+  let currentGeom = geom;
+  let totalRowsInserted = 0;
+  // Track all row insertions so we can adjust non-repositioned images later.
+  const rowInsertions: Array<{ atRow: number; count: number }> = [];
 
   for (let b = 0; b < blocks.length; b++) {
     const images = blockImages[b];
     if (images.length === 0) continue;
+    images.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
+
+    const adjBlockEndRow = blocks[b].endRow + totalRowsInserted;
+    const nextBlockIdx = b + 1;
 
     let totalImgHeight = 0;
     for (const img of images) {
       totalImgHeight += img.h + SPACING_PX * EMU_PER_PX;
     }
 
-    const adjEndRow = blocks[b].endRow + cumulativeInsert;
-    // gapStartY = top of the row AFTER the block ends (first empty row)
-    const gapStartY = geom.rowStart(adjEndRow + 1);
+    const gapStartY = currentGeom.rowStart(adjBlockEndRow);
     const stackBottomY = gapStartY + totalImgHeight;
 
-    const nextBlockIdx = b + 1;
-    // Only insert rows if there's a NEXT content block that would be overlapped.
-    // If this is the last block, images can extend freely below without row insertion.
     if (nextBlockIdx < blocks.length) {
-      const nextAdjStartRow = blocks[nextBlockIdx].startRow + cumulativeInsert;
-      const nextBlockStartY = geom.rowStart(nextAdjStartRow);
+      const nextAdjStartRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+      const nextBlockStartY = currentGeom.rowStart(nextAdjStartRow);
       const gapBuffer = GAP_ROWS * avgRowH;
 
       if (stackBottomY >= nextBlockStartY - gapBuffer) {
         const overlapEmu = stackBottomY - (nextBlockStartY - gapBuffer);
-        const rowsNeeded = Math.ceil(overlapEmu / avgRowH) + GAP_ROWS;
-      // Store insertion info: insert AFTER this block (at blockIdx + 0.5)
-      // We use blockIdx to track the insertion point.
-        insertionsNeeded.push({ blockIdx: b, rows: rowsNeeded });
-        cumulativeInsert += rowsNeeded;
+        const overlapRows = Math.ceil(overlapEmu / avgRowH) + GAP_ROWS;
+        const insertAtRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+
+        const sheetXml = await readEntryText(zip, sheetFile);
+        if (sheetXml && typeof sheetXml === 'string') {
+          const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
+            sheetXml, insertAtRow, overlapRows,
+          );
+          zip.file(sheetFile, newXml);
+          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+          currentGeom = new DrawingGeometry(sheet);
+          totalRowsInserted += overlapRows;
+          rowInsertions.push({ atRow: blocks[nextBlockIdx].startRow, count: overlapRows });
+          debugLog.log('DRAWING', '  inserted ' + overlapRows + ' rows at row ' + insertAtRow);
+        }
+      }
+    }
+
+    let nextY = currentGeom.rowStart(adjBlockEndRow) + SPACING_PX * EMU_PER_PX;
+    let lastImgBottomY = nextY;
+    for (const img of images) {
+      if (nextY !== img.y1 || img.x1 !== 0) {
+        img.newY1 = nextY;
+        const originalWidth = img.w;
+        img.x1 = 0;
+        img.x2 = originalWidth;
+        img.repositioned = true;
+        moved++;
+      }
+      nextY += img.h + SPACING_PX * EMU_PER_PX;
+      lastImgBottomY = nextY;
+    }
+
+    // After placing images, check if the last image extends past the next block.
+    // If so, insert rows to push the next block down.
+    if (nextBlockIdx < blocks.length) {
+      const nextAdjRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+      const nextBlockStartY = currentGeom.rowStart(nextAdjRow);
+      const gapBuffer = GAP_ROWS * avgRowH;
+      if (lastImgBottomY >= nextBlockStartY - gapBuffer) {
+        const overlapEmu = lastImgBottomY - (nextBlockStartY - gapBuffer);
+        const overlapRows = Math.ceil(overlapEmu / avgRowH) + GAP_ROWS;
+        const insertAtRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
+        const sheetXml = await readEntryText(zip, sheetFile);
+        if (sheetXml && typeof sheetXml === 'string') {
+          const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
+            sheetXml, insertAtRow, overlapRows,
+          );
+          zip.file(sheetFile, newXml);
+          for (const [k, v] of newMapping) cellMapping.set(k, v);
+          shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+          currentGeom = new DrawingGeometry(sheet);
+          totalRowsInserted += overlapRows;
+          rowInsertions.push({ atRow: blocks[nextBlockIdx].startRow, count: overlapRows });
+          debugLog.log('DRAWING', '  post-place inserted ' + overlapRows + ' rows at row ' + insertAtRow);
+        }
+      }    }
+  }
+
+  // Step 3: Shift non-repositioned images by the cumulative row insertion offset.
+  // After row insertions, the sheet geometry has changed. Non-repositioned images
+  // still have their original Y positions, but those Y positions now map to
+  // different rows in the modified sheet. We need to shift their Y by the
+  // total rows inserted BEFORE their position.
+  if (totalRowsInserted > 0) {
+    for (const r of rects) {
+      if (r.repositioned) continue; // already handled
+      const origRow = geom.yToRow(r.y1).row;
+      let shiftRows = 0;
+      for (const ins of rowInsertions) {
+        if (ins.atRow <= origRow) {
+          shiftRows += ins.count;
+        }
+      }
+      if (shiftRows > 0) {
+        r.newY1 = r.y1 + shiftRows * avgRowH;
+        r.repositioned = true;
+        moved++;
+      }
+    }
+
+    // Step 4: Fix shifted images that overlap content blocks.
+    // For each shifted image, find the content block it was originally adjacent to,
+    // place it below that block, and insert rows if the image extends past the
+    // next content block.
+    let step4Blocks = findAllContentBlocks(sheet, currentGeom);
+    // Collect shifted images and sort by their shifted position (top to bottom)
+    const shiftedImages: AnchorRect[] = [];
+    for (const r of rects) {
+      if (!r.repositioned) continue;
+      const origRow = geom.yToRow(r.y1).row;
+      if (rowInsertions.some(ins => ins.atRow <= origRow)) {
+        shiftedImages.push(r);
+      }
+    }
+    shiftedImages.sort((a, b) => a.newY1 - b.newY1);
+
+    for (const r of shiftedImages) {
+      // Use ORIGINAL row to find associated block — original block indices
+      // are stable across row insertions (insertions don't add/remove blocks).
+      const origRow = geom.yToRow(r.y1).row;
+      let assocBlockIdx = -1;
+      for (let i = 0; i < blocks.length; i++) {
+        if (blocks[i].endRow <= origRow + 2) {
+          assocBlockIdx = i;
+        }
+      }
+      if (assocBlockIdx < 0) continue;
+
+      const assocBlock = step4Blocks[assocBlockIdx];
+
+      // Place below the associated block
+      r.newY1 = assocBlock.endY + GAP_ROWS * avgRowH;
+      r.x1 = 0;
+      r.x2 = r.w;
+
+      // Check if image extends past the next content block
+      const nextBlockIdx = assocBlockIdx + 1;
+      if (nextBlockIdx < step4Blocks.length) {
+        const imgBottomY = r.newY1 + r.h;
+        const nextBlock = step4Blocks[nextBlockIdx];
+        const gapBuffer = GAP_ROWS * avgRowH;
+
+        if (imgBottomY >= nextBlock.startY - gapBuffer) {
+          // Insert rows to push the next block (and everything after) down
+          const overlapRows = Math.ceil((imgBottomY - (nextBlock.startY - gapBuffer)) / avgRowH) + GAP_ROWS;
+          const insertAtRow = nextBlock.startRow;
+
+          const sheetXml = await readEntryText(zip, sheetFile);
+          if (sheetXml && typeof sheetXml === 'string') {
+            const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(sheetXml, insertAtRow, overlapRows);
+            zip.file(sheetFile, newXml);
+            for (const [k, v] of newMapping) cellMapping.set(k, v);
+            shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
+            currentGeom = new DrawingGeometry(sheet);
+            totalRowsInserted += overlapRows;
+            rowInsertions.push({ atRow: insertAtRow, count: overlapRows });
+            step4Blocks = findAllContentBlocks(sheet, currentGeom);
+
+            // Re-place below the (now shifted) associated block
+            if (assocBlockIdx < step4Blocks.length) {
+              r.newY1 = step4Blocks[assocBlockIdx].endY + GAP_ROWS * avgRowH;
+            }
+          }
+        }
       }
     }
   }
 
-  // ═══ PHASE 3: Execute ALL row insertions ═══
-  let totalRowsInserted = 0;
-  for (const ins of insertionsNeeded) {
-    // Insert AFTER the block's end row, not at the next block's start
-    const insertAtRow = blocks[ins.blockIdx].endRow + 1 + totalRowsInserted;
-    const sheetXml = await readEntryText(zip, sheetFile);
-    if (sheetXml && typeof sheetXml === 'string') {
-      const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
-        sheetXml, insertAtRow, ins.rows,
-      );
-      zip.file(sheetFile, newXml);
-      for (const [k, v] of newMapping) cellMapping.set(k, v);
-      shiftSheetRows(sheet, insertAtRow, ins.rows, newMapping);
-      totalRowsInserted += ins.rows;
-    }
-  }
-
-  // NOTE: Row insertion shifting of drawing anchors is handled in the
-  // write-back section of fixDrawingOverlaps (updateAnchorsString).
-  // We do NOT shift anchors here because updateAnchorsString uses the
-  // original XML as its base string and would overwrite our shifts.
-
-  // ═══ PHASE 5: Place repositioned images using FINAL geometry ═══
-  const finalGeom = new DrawingGeometry(sheet);
-  let moved = 0;
-
-  for (let b = 0; b < blocks.length; b++) {
-    const images = blockImages[b];
-    if (images.length === 0) continue;
-
-    let offsetBefore = 0;
-    for (const ins of insertionsNeeded) {
-      if (ins.blockIdx < b) offsetBefore += ins.rows;
-    }
-    const adjEndRow = blocks[b].endRow + offsetBefore;
-
-    images.sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
-
-    // Place images AFTER the block (adjEndRow + 1 = first empty row)
-    let nextY = finalGeom.rowStart(adjEndRow + 1) + SPACING_PX * EMU_PER_PX;
-    for (const img of images) {
-      img.newY1 = nextY;
-      img.x1 = 0;
-      img.x2 = img.w;
-      img.repositioned = true;
-      moved++;
-      nextY += img.h + SPACING_PX * EMU_PER_PX;
-    }
-
-    debugLog.log('DRAWING', `  block ${b}: placed ${images.length} images after row ${adjEndRow}`);
-  }
-
-  return { moved, insertions: insertionsNeeded, totalRowsInserted, blocks };
+  return moved;
 }
 
 
@@ -966,11 +1069,7 @@ export async function fixDrawingOverlaps(
   // Phase 2: Place each image after the content block it overlaps.
   // This is per-block placement: images overlapping Block A go after Block A,
   // images overlapping Block B go after Block B, etc.
-  const blockResult = await placeImagesByBlock(rects, blocks, geom, sheet, zip, sheetFile, cellMapping);
-  const movedByContentPush = blockResult.moved;
-  const blockInsertions = blockResult.insertions;
-  const blockTotalRowsInserted = blockResult.totalRowsInserted;
-  const blockOrigBlocks = blockResult.blocks;
+  const movedByContentPush = await placeImagesByBlock(rects, blocks, geom, sheet, zip, sheetFile, cellMapping);
   debugLog.log("DRAWING", `  placeImagesByBlock: ${movedByContentPush} images placed after their content blocks`);
 
   // Mark which anchors overlap content (using actual block intersection).
@@ -1010,11 +1109,30 @@ export async function fixDrawingOverlaps(
   }
 
   // Phase 3: Resolve any remaining image-image overlaps.
+  // After placeImagesByBlock, some overlaps may remain between:
+  //   - images placed by per-block logic and already-safe images
+  //   - images within the same block that weren't separated
+  //   - test cases without content blocks
+  // Run the safety pass on ALL images to ensure no overlaps remain.
+  // Safety pass: resolve remaining overlaps.
+  // First pass: spread repositioned images away from non-repositioned.
+  // Second pass: spread non-repositioned images among themselves.
+  // Final pass: resolve any remaining cross-group overlaps.
   const remainingOverlaps = countOverlaps(rects);
   if (remainingOverlaps > 0) {
-    debugLog.log("DRAWING", `  ${remainingOverlaps} overlaps remain, running safety pass`);
-    spreadRects(rects);
-    if (countOverlaps(rects) > 0) spreadRects(rects);
+    debugLog.log("DRAWING", `  ${remainingOverlaps} overlaps remain after placement, running safety pass`);
+    const repositioned = rects.filter(r => r.repositioned);
+    const nonRepositioned = rects.filter(r => !r.repositioned);
+    if (repositioned.length > 0 && nonRepositioned.length > 0) {
+      spreadRects(repositioned, nonRepositioned);
+      spreadRects(nonRepositioned, repositioned);
+    } else {
+      spreadRects(rects);
+    }
+    // Final cleanup: resolve any remaining overlaps across all images.
+    if (countOverlaps(rects) > 0) {
+      spreadRects(rects);
+    }
   }
 
   // Phase 5: Count final stats.
@@ -1061,76 +1179,31 @@ export async function fixDrawingOverlaps(
     const embedIdToNewPos = new Map<string, { fromRow: number; fromRowOff: number; toRow: number; toRowOff: number; newY: number; fromCol: number; fromColOff: number }>();
     // Check if row insertions happened (writeBackGeom differs from geom).
     const hasRowInsertions = writeBackGeom !== geom;
-
-    // Build row-shift map: for each insertion, compute insertAtRow
-    // so we can shift non-repositioned anchors correctly.
-    const rowShifts: Array<{ insertAtRow: number; rows: number }> = [];
-    if (blockInsertions && blockOrigBlocks) {
-      let cumRows = 0;
-      for (const ins of blockInsertions) {
-        const insertAtRow = blockOrigBlocks[ins.blockIdx].endRow + 1 + cumRows;
-        rowShifts.push({ insertAtRow, rows: ins.rows });
-        cumRows += ins.rows;
-      }
-    }
-    // Compute accumulated shift for a given original row.
-    function getRowShift(origRow: number): number {
-      let shift = 0;
-      for (const s of rowShifts) {
-        if (origRow >= s.insertAtRow) shift += s.rows;
-      }
-      return shift;
-    }
-
     for (const rect of rects) {
-      // ALL images get column A (col=0, colOff=0).
-      // For repositioned images: update both row AND col using new positions.
-      // For non-repositioned images: keep original row, but set col to column A.
+      // All images need updated positions when row insertions occurred.
+      // The writeBackGeom reflects the shifted rows, so both repositioned
+      // and non-repositioned images get correct row values.
       const anchor = allAnchors[rect.index];
       if (!anchor) continue;
-      // Get original row from XML anchor
-      const fromEl = firstChildElement(anchor.anchor, 'from');
-      if (!fromEl) continue;
-      const origRow = intOf(firstChildElement(fromEl, 'row'));
-      if (origRow < 0) continue;
+      // Use writeBackGeom for repositioned images.
+      const geomForAnchor = writeBackGeom;
+      const fromPos = geomForAnchor.yToRow(rect.newY1);
+      const fromRowOff = Math.max(0, Math.round(fromPos.off));
+      const newY2 = rect.newY1 + rect.h;
+      const toPos = geomForAnchor.yToRow(newY2);
+      const toRowOff = Math.max(0, Math.round(toPos.off));
       // Use embedId + original row as unique key to handle multiple anchors
       // sharing the same r:embed.
+      const origRow = intOf(firstChildElement(firstChildElement(allAnchors[rect.index].anchor, 'from')!, 'row')!);
       const key = `${anchor.embedId}@r${origRow}`;
-      if (rect.repositioned) {
-        // Repositioned: use new positions from geometry
-        const geomForAnchor = writeBackGeom;
-        const fromPos = geomForAnchor.yToRow(rect.newY1);
-        const fromRowOff = Math.max(0, Math.round(fromPos.off));
-        const newY2 = rect.newY1 + rect.h;
-        const toPos = geomForAnchor.yToRow(newY2);
-
-        const toRowOff = Math.max(0, Math.round(toPos.off));
-        embedIdToNewPos.set(key, {
-          fromRow: fromPos.row, fromRowOff,
-          toRow: toPos.row, toRowOff,
-          newY: Math.round(geomForAnchor.rowStart(fromPos.row - 1) + fromPos.off),
-          fromCol: 0, fromColOff: 0,
-        });
-      } else {
-        // Non-repositioned: shift row by accumulated insertions, set column A.
-        const origRowOff = intOf(firstChildElement(fromEl, 'rowOff'));
-        const toEl = firstChildElement(anchor.anchor, 'to');
-        const origToRow = toEl ? intOf(firstChildElement(toEl, 'row')) : origRow + 1;
-        const origToRowOff = toEl ? intOf(firstChildElement(toEl, 'rowOff')) : origRowOff;
-        // Apply row shift from insertions that happened at or before this row.
-        const shift = hasRowInsertions ? getRowShift(origRow) : 0;
-        // Compute correct EMU y for spPr/a:off update.
-        const shiftedRow1Based = origRow + shift;
-        const computedNewY = writeBackGeom.rowStart(shiftedRow1Based - 1) + (origRowOff >= 0 ? origRowOff : 0);
-        embedIdToNewPos.set(key, {
-          fromRow: shiftedRow1Based, fromRowOff: origRowOff >= 0 ? origRowOff : 0,
-          toRow: origToRow + shift, toRowOff: origToRowOff >= 0 ? origToRowOff : 0,
-          newY: computedNewY,
-          fromCol: 0, fromColOff: 0,
-        });
-      }
+      embedIdToNewPos.set(key, {
+        fromRow: fromPos.row, fromRowOff,
+        toRow: toPos.row, toRowOff,
+        newY: Math.round(geomForAnchor.rowStart(fromPos.row - 1) + fromPos.off),
+        fromCol: 0, fromColOff: 0,
+      });
     }
-
+    debugLog.log("DRAWING", `  embedIdToNewPos size=${embedIdToNewPos.size}`);
     const modifiedXml = updateAnchorsString(originalXml, embedIdToNewPos);
     if (modifiedXml !== originalXml) {
       zip.file(drawingTarget, modifiedXml);
@@ -1466,10 +1539,7 @@ function spreadRects(rects: AnchorRect[], staticBlockers?: AnchorRect[]): number
       y = Math.max(...blockers.map((p) => p.newY1 + p.h)) + SPACING_PX * EMU_PER_PX;
 
     }
-    if (y !== r.y1) {
-      moved++;
-      r.repositioned = true;
-    }
+    if (y !== r.y1) moved++;
     r.newY1 = y;
     placed.push(r);
   }
@@ -1541,20 +1611,27 @@ function updateAnchorsString(
       const embedMatch = blockStr.match(/r:embed="([^"]+)"/);
       // Use detected prefix to match the row element correctly.
       const rowTag = tag("row");
-      // Match <row>, <xdr:row>, <a:row> — any prefix before 'row'
-      const rowRegex = /<[^>]*?row>(\d+)<\/[^>]*?row>/;
+      const rowRegex = new RegExp(`<${rowTag}>(\\d+)<\/${rowTag}>`);
       const fromRowMatch = blockStr.match(rowRegex);
       if (embedMatch && fromRowMatch) {
+        // Build unique key: embedId@rROW to handle multiple anchors sharing r:embed
         const key = `${embedMatch[1]}@r${fromRowMatch[1]}`;
         if (embedIdToNewPos.has(key)) {
-          blocks.push({ open: anchorOpen, close: anchorClose + closeTag.length, embedId: key, isTwoCell });
+          blocks.push({
+            open: anchorOpen,
+            close: anchorClose + closeTag.length,
+            embedId: key,
+            isTwoCell,
+          });
         } else if (embedIdToNewPos.has(embedMatch[1])) {
-          blocks.push({ open: anchorOpen, close: anchorClose + closeTag.length, embedId: embedMatch[1], isTwoCell });
-        } else {
-          console.log(`  updateAnchors: SKIP anchor embed=${embedMatch[1]} row=${fromRowMatch[1]} key=${key} (not in map)`);
+          // Fallback: old-style key (single anchor per embed)
+          blocks.push({
+            open: anchorOpen,
+            close: anchorClose + closeTag.length,
+            embedId: embedMatch[1],
+            isTwoCell,
+          });
         }
-      } else {
-        console.log(`  updateAnchors: SKIP anchor (embedMatch=${!!embedMatch} fromRowMatch=${!!fromRowMatch})`);
       }
       pos = anchorClose + closeTag.length;
     }

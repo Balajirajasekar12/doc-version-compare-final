@@ -567,31 +567,35 @@ export function shiftSheetRows(
     }
   }
   // Add shifted entries to rowByNum and remove old ones
+  // Track old row numbers BEFORE adding new ones to avoid deleting entries we just added.
+  const oldRowByNumKeys = Array.from(shiftedRows.keys()).map(k => k - rowsToInsert);
   for (const [newRow, rowEl] of shiftedRows) {
     sheet.rowByNum.set(newRow, rowEl);
   }
-  for (const oldRow of shiftedRows.keys()) {
+  for (const oldRow of oldRowByNumKeys) {
     sheet.rowByNum.delete(oldRow);
   }
 
   // 2. Shift cells map: move cells at rows >= insertAtRow
   const shiftedCells = new Map<number, Map<number, CellData>>();
+  const oldCellKeys: number[] = [];
   for (const [row, colMap] of sheet.cells) {
     if (row >= insertAtRow) {
       shiftedCells.set(row + rowsToInsert, colMap);
+      oldCellKeys.push(row);
     }
   }
   for (const [newRow, colMap] of shiftedCells) {
     sheet.cells.set(newRow, colMap);
   }
-  for (const oldRow of shiftedCells.keys()) {
+  for (const oldRow of oldCellKeys) {
     sheet.cells.delete(oldRow);
   }
 
   // 3. Rebuild formulaMap and valueMap using cellMapping
   const newFormulaMap = new Map<string, string>();
   const newValueMap = new Map<string, string>();
-  for (const [ref, formula] of (sheet.formulaMap || new Map())) {
+  for (const [ref, formula] of sheet.formulaMap) {
     const newRef = cellMapping.get(ref);
     if (newRef) {
       newFormulaMap.set(newRef, formula);
@@ -599,7 +603,7 @@ export function shiftSheetRows(
       newFormulaMap.set(ref, formula);
     }
   }
-  for (const [ref, value] of (sheet.valueMap || new Map())) {
+  for (const [ref, value] of sheet.valueMap) {
     const newRef = cellMapping.get(ref);
     if (newRef) {
       newValueMap.set(newRef, value);
@@ -611,7 +615,7 @@ export function shiftSheetRows(
   sheet.valueMap = newValueMap;
 
   // 4. Shift merge ranges
-  for (const merge of (sheet.merges || [])) {
+  for (const merge of sheet.merges) {
     if (merge.row1 >= insertAtRow) merge.row1 += rowsToInsert;
     if (merge.row2 >= insertAtRow) merge.row2 += rowsToInsert;
     // Update ref string
