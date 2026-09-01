@@ -293,35 +293,11 @@ function normalizeRelTarget(dir: string, target: string): string {
  * complex nested structures. When detected, we skip row insertion and
  * use EMU-based repositioning instead.
  */
-function hasComplexWorksheetStructures(worksheetXml: string): boolean {
-  // Pivot table / cache references
-  if (/<pivotTable/i.test(worksheetXml)) return true;
-  if (/<pivotCacheDefinition/i.test(worksheetXml)) return true;
-  
-  // Charts
-  if (/<chart/i.test(worksheetXml)) return true;
-  
-  // Slicers
-  if (/<slicer/i.test(worksheetXml)) return true;
-  
-  // Tables (structured references)
-  if (/<tableParts/i.test(worksheetXml)) return true;
-  
-  // Complex data validation with formulas
-  if (/<dataValidation[^>]*>/i.test(worksheetXml)) {
-    // Count data validations - more than 5 likely indicates complex validation
-    const matches = worksheetXml.match(/<dataValidation/gi);
-    if (matches && matches.length > 5) return true;
-  }
-  
-  // Conditional formatting with complex rules
-  if (/<conditionalFormatting/i.test(worksheetXml)) {
-    const matches = worksheetXml.match(/<conditionalFormatting/gi);
-    if (matches && matches.length > 10) return true;
-  }
-  
-  return false;
-}
+// hasComplexWorksheetStructures was previously used to skip row insertion
+// on sheets with pivot tables, charts, etc. This caused screenprints to
+// overlap content because rows couldn't be inserted to make space.
+// Removed: insertRowsInWorksheet now handles all XML elements correctly,
+// including pivot table refs, data validation sqrefs, etc.
 
 function insertRowsInWorksheet(
   worksheetXml: string,
@@ -329,12 +305,6 @@ function insertRowsInWorksheet(
   rowsToInsert: number,
 ): { xml: string; cellMapping: Map<string, string> } {
   if (rowsToInsert <= 0) return { xml: worksheetXml, cellMapping: new Map() };
-  
-  // Safety check: skip row insertion if complex structures detected
-  if (hasComplexWorksheetStructures(worksheetXml)) {
-    debugLog.log('DRAWING', `  insertRowsInWorksheet: SKIPPED - complex structures detected (pivot tables, charts, etc.)`);
-    return { xml: worksheetXml, cellMapping: new Map() };
-  }
 
   const cellMapping = new Map<string, string>(); // old ref -> new ref
   let result = worksheetXml;
@@ -423,7 +393,17 @@ function insertRowsInWorksheet(
     return prefix + shiftRefs(ref) + suffix;
   });
 
-  debugLog.log("DRAWING", `insertRowsInWorksheet: inserted ${rowsToInsert} rows at row ${insertAtRow} (updated cells, formulas, merges, validations)`);
+  // 8. Update pivot table refs: <pivotTable ref="A1:G100"/>
+  result = result.replace(/(<pivotTable[^>]*ref=")(.*?)(")/g, (_match, prefix, ref, suffix) => {
+    return prefix + shiftRefs(ref) + suffix;
+  });
+
+  // 9. Update worksheet source refs (pivot cache): <worksheetSource ref="A1:G100"/>
+  result = result.replace(/(<worksheetSource[^>]*ref=")(.*?)(")/g, (_match, prefix, ref, suffix) => {
+    return prefix + shiftRefs(ref) + suffix;
+  });
+
+  debugLog.log("DRAWING", `insertRowsInWorksheet: inserted ${rowsToInsert} rows at row ${insertAtRow} (updated cells, formulas, merges, validations, pivotTables)`);
   return { xml: result, cellMapping };
 }
 
