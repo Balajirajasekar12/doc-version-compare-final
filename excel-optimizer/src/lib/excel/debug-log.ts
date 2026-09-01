@@ -56,6 +56,13 @@ class DebugLogger {
   }
 
   /**
+   * Get the log as a Blob for embedding in downloads.
+   */
+  toBlob(): Blob {
+    return new Blob([this.toText()], { type: 'text/plain' });
+  }
+
+  /**
    * Trigger a browser download of the log file.
    */
   download(filename?: string): void {

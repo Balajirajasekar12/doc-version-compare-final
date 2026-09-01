@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import type { LucideIcon } from "lucide-react";
 import type { OptimizationReport } from "@eo/lib/excel";
 import { downloadBlob, formatBytes, formatNumber } from "./utils";
+import { debugLog } from "@eo/lib/excel/debug-log";
 
 interface Props {
   report: OptimizationReport;
@@ -52,6 +53,10 @@ function Bullet({ icon: Icon, label, value }: { icon: LucideIcon; label: string;
 
 export function ReportView({ report, blob, downloadName, originalBlob, originalName, onReset }: Props) {
   const [copied, setCopied] = useState(false);
+
+  const downloadDebugLog = useCallback(() => {
+    debugLog.download(`eo-debug-${report.inputFileName.replace(/\.[^.]+$/, "")}.log`);
+  }, [report]);
 
   const copyDiagnostics = useCallback(async () => {
     const lines = [
@@ -210,6 +215,10 @@ export function ReportView({ report, blob, downloadName, originalBlob, originalN
             <Button variant="ghost" size="sm" className="cursor-pointer" onClick={copyDiagnostics}>
               <ClipboardCopy className="size-3.5" />
               {copied ? "Copied!" : "Copy diagnostics"}
+            </Button>
+            <Button variant="ghost" size="sm" className="cursor-pointer" onClick={downloadDebugLog}>
+              <Download className="size-3.5" />
+              Download debug log
             </Button>
 
           </div>
