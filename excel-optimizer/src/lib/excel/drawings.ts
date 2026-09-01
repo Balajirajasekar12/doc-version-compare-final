@@ -685,19 +685,26 @@ async function placeImagesByBlock(
   const avgRowH = geom.defaultRowHeight * 12700;
   const GAP_ROWS = 1;
 
-  // Step 1: Assign each image to a block using center-based detection.
-  // An image overlaps a block if its CENTER point is inside the block's row range.
-  // This avoids false assignments at block boundaries (e.g., screenprints
-  // positioned just at the edge of a content label).
+  // Step 1: Assign each image to a block using edge-based detection.
+  // An image overlaps a block if ANY part of it intersects the block's row range.
+  // This is more thorough than center-based detection which can miss images
+  // that span across content blocks.
   const blockImages: AnchorRect[][] = blocks.map(() => []);
   for (const r of rects) {
-    const imgCenterRow = geom.yToRow(r.y1 + r.h / 2).row;
+    const imgTopRow = geom.yToRow(r.y1).row;
+    const imgBottomRow = geom.yToRow(r.y1 + r.h).row;
+    let assigned = false;
     for (let b = 0; b < blocks.length; b++) {
-      if (imgCenterRow >= blocks[b].startRow && imgCenterRow <= blocks[b].endRow) {
+      // AABB intersection: image top <= block end AND image bottom >= block start
+      if (imgTopRow <= blocks[b].endRow && imgBottomRow >= blocks[b].startRow) {
         blockImages[b].push(r);
+        assigned = true;
         break;
       }
     }
+    // If not assigned to any block via edge intersection,
+    // leave the image unassigned — it will be caught by the content
+    // overlap sweep in Phase 4 if needed.
   }
 
   // Step 2: For each block, check if ALL its images fit in the gap.
@@ -849,7 +856,7 @@ async function placeImagesByBlock(
           assocBlockIdx = i;
         }
       }
-      if (assocBlockIdx < 0) continue;
+      if (assocBlockIdx < 0 || assocBlockIdx >= step4Blocks.length) continue;
 
       const assocBlock = step4Blocks[assocBlockIdx];
 
@@ -1125,6 +1132,44 @@ export async function fixDrawingOverlaps(
     }
     // Final cleanup: resolve any remaining overlaps across all images.
     if (countOverlaps(rects) > 0) {
+      spreadRects(rects);
+    }
+  }
+
+  // Phase 4: Final content overlap sweep.
+  // After all block-based placement, check if any image still overlaps a
+  // content block. This catches edge cases where:
+  //   - Image center was outside all blocks so Step 1 didn't assign it
+  //   - Image was placed in a gap but extends into the next block
+  //   - Non-repositioned images that shifted due to row insertions
+  {
+    const currentBlocks = findAllContentBlocks(sheet, geom);
+    const avgRowHLocal = geom.defaultRowHeight * 12700;
+    const GAP_ROWS_LOCAL = 1;
+    let sweepMoved = 0;
+    for (const r of rects) {
+      const imgTop = r.newY1;
+      const imgBottom = r.newY1 + r.h;
+      for (const block of currentBlocks) {
+        // Check if image overlaps this content block (AABB intersection)
+        if (imgTop < block.endY && imgBottom > block.startY) {
+          // Place after the block we're overlapping
+          const targetY = block.endY + GAP_ROWS_LOCAL * avgRowHLocal;
+          if (Math.abs(targetY - r.newY1) > EMU_PER_PX) {
+            r.newY1 = targetY;
+            r.x1 = 0;
+            r.x2 = r.w;
+            r.repositioned = true;
+            sweepMoved++;
+            debugLog.log("DRAWING", `  contentSweep: moved image from row ${geom.yToRow(imgTop).row} to row ${geom.yToRow(targetY).row} (was overlapping block ${block.startRow}-${block.endRow})`);
+          }
+          break;
+        }
+      }
+    }
+    if (sweepMoved > 0) {
+      debugLog.log("DRAWING", `  contentSweep: moved ${sweepMoved} images to resolve content overlaps`);
+      // Re-spread to resolve any new image-image overlaps from the sweep
       spreadRects(rects);
     }
   }
