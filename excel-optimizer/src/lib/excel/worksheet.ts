@@ -595,33 +595,39 @@ export function shiftSheetRows(
   // 3. Rebuild formulaMap and valueMap using cellMapping
   const newFormulaMap = new Map<string, string>();
   const newValueMap = new Map<string, string>();
-  for (const [ref, formula] of sheet.formulaMap) {
-    const newRef = cellMapping.get(ref);
-    if (newRef) {
-      newFormulaMap.set(newRef, formula);
-    } else {
-      newFormulaMap.set(ref, formula);
+  if (sheet.formulaMap) {
+    for (const [ref, formula] of sheet.formulaMap) {
+      const newRef = cellMapping.get(ref);
+      if (newRef) {
+        newFormulaMap.set(newRef, formula);
+      } else {
+        newFormulaMap.set(ref, formula);
+      }
     }
   }
-  for (const [ref, value] of sheet.valueMap) {
-    const newRef = cellMapping.get(ref);
-    if (newRef) {
-      newValueMap.set(newRef, value);
-    } else {
-      newValueMap.set(ref, value);
+  if (sheet.valueMap) {
+    for (const [ref, value] of sheet.valueMap) {
+      const newRef = cellMapping.get(ref);
+      if (newRef) {
+        newValueMap.set(newRef, value);
+      } else {
+        newValueMap.set(ref, value);
+      }
     }
   }
   sheet.formulaMap = newFormulaMap;
   sheet.valueMap = newValueMap;
 
   // 4. Shift merge ranges
-  for (const merge of sheet.merges) {
-    if (merge.row1 >= insertAtRow) merge.row1 += rowsToInsert;
-    if (merge.row2 >= insertAtRow) merge.row2 += rowsToInsert;
-    // Update ref string
-    const colStart = String.fromCharCode(64 + merge.col1);
-    const colEnd = String.fromCharCode(64 + merge.col2);
-    merge.ref = `${colStart}${merge.row1}:${colEnd}${merge.row2}`;
+  if (sheet.merges) {
+    for (const merge of sheet.merges) {
+      if (merge.row1 >= insertAtRow) merge.row1 += rowsToInsert;
+      if (merge.row2 >= insertAtRow) merge.row2 += rowsToInsert;
+      // Update ref string
+      const colStart = String.fromCharCode(64 + merge.col1);
+      const colEnd = String.fromCharCode(64 + merge.col2);
+      merge.ref = `${colStart}${merge.row1}:${colEnd}${merge.row2}`;
+    }
   }
 
   // 5. Update maxRow

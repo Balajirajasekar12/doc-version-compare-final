@@ -763,7 +763,49 @@ async function placeImagesByBlock(
     }
 
     const gapStartY = currentGeom.rowStart(adjBlockEndRow);
-    const stackBottomY = gapStartY + totalImgHeight;
+    let stackBottomY = gapStartY + totalImgHeight;
+
+    // FIX: Check non-repositioned images sitting in the gap between this block
+    // and the next block. If our stacked images would overlap them, insert rows
+    // to push those non-repositioned images (and everything after) down.
+    const gapNonRepos = rects.filter(r => {
+      if (r.repositioned || blockImages[b].includes(r)) return false;
+      const imgTopRow = geom.yToRow(r.y1).row; // original row (pre-insertion)
+      return imgTopRow > blocks[b].endRow &&
+        (nextBlockIdx >= blocks.length || imgTopRow <= blocks[nextBlockIdx].startRow);
+    });
+    gapNonRepos.sort((a, c) => a.y1 - c.y1);
+
+    if (gapNonRepos.length > 0) {
+      const firstNonRepoY = gapNonRepos[0].y1;
+      const gapBufferNR = GAP_ROWS * avgRowH;
+      if (stackBottomY >= firstNonRepoY - gapBufferNR) {
+        const overlapEmuNR = stackBottomY - (firstNonRepoY - gapBufferNR);
+        const overlapRowsNR = Math.ceil(overlapEmuNR / avgRowH) + GAP_ROWS;
+        // Insert at the non-repositioned image's original row, adjusted for prior insertions
+        const insertAtRowNR = geom.yToRow(gapNonRepos[0].y1).row + totalRowsInserted;
+        const sheetXmlNR = await readEntryText(zip, sheetFile);
+        if (sheetXmlNR && typeof sheetXmlNR === 'string') {
+          const { xml: newXmlNR, cellMapping: newMappingNR } = insertRowsInWorksheet(
+            sheetXmlNR, insertAtRowNR, overlapRowsNR,
+          );
+          zip.file(sheetFile, newXmlNR);
+          for (const [k, v] of newMappingNR) {
+            for (const [orig, mapped] of cellMapping) {
+              if (mapped === k) cellMapping.set(orig, v);
+            }
+            cellMapping.set(k, v);
+          }
+          shiftSheetRows(sheet, insertAtRowNR, overlapRowsNR, newMappingNR);
+          currentGeom = new DrawingGeometry(sheet);
+          totalRowsInserted += overlapRowsNR;
+          rowInsertions.push({ atRow: geom.yToRow(gapNonRepos[0].y1).row, count: overlapRowsNR });
+          debugLog.log('DRAWING', '  inserted ' + overlapRowsNR + ' rows at row ' + insertAtRowNR + ' (gap non-repositioned images)');
+          // Recalculate stack bottom with updated geometry
+          stackBottomY = currentGeom.rowStart(adjBlockEndRow) + totalImgHeight;
+        }
+      }
+    }
 
     if (nextBlockIdx < blocks.length) {
       const nextAdjStartRow = blocks[nextBlockIdx].startRow + totalRowsInserted;
@@ -1085,29 +1127,98 @@ export async function fixDrawingOverlaps(
   }
 
   // Phase 3: Resolve any remaining image-image overlaps.
-  // After placeImagesByBlock, some overlaps may remain between:
-  //   - images placed by per-block logic and already-safe images
-  //   - images within the same block that weren't separated
-  //   - test cases without content blocks
-  // Run the safety pass on ALL images to ensure no overlaps remain.
-  // Safety pass: resolve remaining overlaps.
-  // First pass: spread repositioned images away from non-repositioned.
-  // Second pass: spread non-repositioned images among themselves.
-  // Final pass: resolve any remaining cross-group overlaps.
+  // CRITICAL: NEVER move repositioned images (placed after their content block).
+  // Instead, when a repositioned image overlaps a non-repositioned image,
+  // INSERT ROWS to push the non-repositioned image (and everything after) down.
+  // This preserves correct placement while eliminating overlaps.
   const remainingOverlaps = countOverlaps(rects);
   if (remainingOverlaps > 0) {
     debugLog.log("DRAWING", `  ${remainingOverlaps} overlaps remain after placement, running safety pass`);
     const repositioned = rects.filter(r => r.repositioned);
     const nonRepositioned = rects.filter(r => !r.repositioned);
+    
+    // Phase 3a: For each repositioned image that overlaps non-repositioned images,
+    // insert rows to push non-repositioned images down (never move repositioned).
     if (repositioned.length > 0 && nonRepositioned.length > 0) {
-      spreadRects(repositioned, nonRepositioned);
+      // Sort repositioned images by Y position (top to bottom)
+      const sortedRepos = [...repositioned].sort((a, b) => a.newY1 - b.newY1);
+      let rowsInsertedForSpread = 0;
+      
+      for (const repo of sortedRepos) {
+        const repoTop = repo.newY1;
+        const repoBottom = repo.newY1 + repo.h;
+        
+        // Find non-repositioned images that this repositioned image overlaps
+        const overlappingNonRepo = nonRepositioned.filter(nr => {
+          const nrTop = nr.y1; // original position (pre任何 insertions)
+          const nrBottom = nr.y1 + nr.h;
+          // AABB overlap check (X overlap assumed since all in col A)
+          return repoTop < nrBottom && repoBottom > nrTop;
+        });
+        
+        if (overlappingNonRepo.length > 0) {
+          // Find the row AFTER the repositioned image's bottom to insert rows
+          const avgRowHLocal = geom.defaultRowHeight * 12700;
+          const avgRowHEmu = avgRowHLocal;
+          // Calculate how many rows the non-repositioned images extend below repoBottom
+          let maxNonRepoBottomRow = 0;
+          for (const nr of overlappingNonRepo) {
+            const nrBottomRow = geom.yToRow(nr.y1 + nr.h).row;
+            if (nrBottomRow > maxNonRepoBottomRow) maxNonRepoBottomRow = nrBottomRow;
+          }
+          const repoBottomRow = geom.yToRow(repoBottom).row;
+          // Rows to insert = enough to push non-repositioned images below repositioned
+          const gapNeeded = repoBottomRow + 2 - geom.yToRow(overlappingNonRepo[0].y1).row;
+          if (gapNeeded > 0) {
+            const insertAtRow = geom.yToRow(overlappingNonRepo[0].y1).row + rowsInsertedForSpread;
+            const sheetXml = await readEntryText(zip, sheetFile);
+            if (sheetXml && typeof sheetXml === 'string') {
+              const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(
+                sheetXml, insertAtRow, gapNeeded,
+              );
+              zip.file(sheetFile, newXml);
+              for (const [k, v] of newMapping) {
+                for (const [orig, mapped] of cellMapping) {
+                  if (mapped === k) cellMapping.set(orig, v);
+                }
+                cellMapping.set(k, v);
+              }
+              shiftSheetRows(sheet, insertAtRow, gapNeeded, newMapping);
+              // Shift non-repositioned images down by gapNeeded rows
+              const shiftEmu = gapNeeded * avgRowHEmu;              for (const nr of overlappingNonRepo) {
+                nr.y1 += shiftEmu;
+                nr.y2 = nr.y1 + nr.h;
+                if (nr.newY1 === nr.y1 - shiftEmu) nr.newY1 = nr.y1;
+              }
+              // Also shift ALL non-repositioned images below this point
+              for (const nr of nonRepositioned) {
+                if (!overlappingNonRepo.includes(nr) && nr.y1 >= overlappingNonRepo[0].y1) {
+                  nr.y1 += shiftEmu;
+                  nr.y2 = nr.y1 + nr.h;
+                  if (nr.newY1 === nr.y1 - shiftEmu) nr.newY1 = nr.y1;
+                }
+              }
+              rowsInsertedForSpread += gapNeeded;
+              debugLog.log('DRAWING', `  spreadRows: inserted ${gapNeeded} rows at row ${insertAtRow} to resolve overlap between repositioned and non-repositioned images`);
+            }
+          }
+        }
+      }
+      
+      // After row insertions, re-parse sheet for accurate geometry
+      if (rowsInsertedForSpread > 0) {
+        currentGeom = geom; // keep original for now, the repositioned images use newY1 in EMU
+      }
+      
+      // Phase 3b: Spread non-repositioned images against repositioned as static blockers
+      // This ensures non-repositioned images don't overlap repositioned ones
       spreadRects(nonRepositioned, repositioned);
-    } else {
-      spreadRects(rects);
-    }
-    // Final cleanup: resolve any remaining overlaps across all images.
-    if (countOverlaps(rects) > 0) {
-      spreadRects(rects);
+    } else if (repositioned.length > 0) {
+      // Only repositioned images — spread them (shouldn't happen but safe fallback)
+      spreadRects(repositioned);
+    } else if (nonRepositioned.length > 0) {
+      // Only non-repositioned images — spread them
+      spreadRects(nonRepositioned);
     }
   }
 
