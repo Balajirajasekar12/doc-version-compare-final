@@ -697,7 +697,6 @@ async function placeImagesByBlock(
     debugLog.log('PLACE_BLOCK', `  img#${ri}: rows ${imgTopRow}-${imgBottomRow} (y1=${Math.round(r.y1)} h=${Math.round(r.h)} w=${Math.round(r.w)}) embed=${r.embedId ?? '?'}`);
   }
   const blockImages: AnchorRect[][] = blocks.map(() => []);
-  const unassignedImages: AnchorRect[] = [];
   for (const r of rects) {
     const imgTopRow = geom.yToRow(r.y1).row;
     const imgBottomRow = geom.yToRow(r.y1 + r.h).row;
@@ -711,7 +710,24 @@ async function placeImagesByBlock(
       }
     }
     if (!assigned) {
-      unassignedImages.push(r);
+      // Check if this image overlaps the NEXT content block (the block
+      // after the nearest preceding block). If so, assign to the preceding
+      // block so it gets placed after it with proper spacing.
+      // If the image doesn't overlap any future block, leave it alone.
+      let precedingBlockIdx = -1;
+      for (let b = 0; b < blocks.length; b++) {
+        if (blocks[b].endRow <= imgTopRow) precedingBlockIdx = b;
+      }
+      let overlapsNextBlock = false;
+      if (precedingBlockIdx >= 0 && precedingBlockIdx + 1 < blocks.length) {
+        const nextBlock = blocks[precedingBlockIdx + 1];
+        if (imgBottomRow >= nextBlock.startRow) overlapsNextBlock = true;
+      }
+      if (overlapsNextBlock && precedingBlockIdx >= 0) {
+        blockImages[precedingBlockIdx].push(r);
+        debugLog.log('PLACE_BLOCK', `  img#${rects.indexOf(r)} assigned to block ${precedingBlockIdx} (overlaps next block ${precedingBlockIdx + 1})`);
+      }
+      // else: image is safely between blocks, leave it untouched
     }
   }
   for (let b = 0; b < blocks.length; b++) {
@@ -719,9 +735,7 @@ async function placeImagesByBlock(
       debugLog.log('PLACE_BLOCK', `  Block ${b} (rows ${blocks[b].startRow}-${blocks[b].endRow}): ${blockImages[b].length} images assigned`);
     }
   }
-  if (unassignedImages.length > 0) {
-    debugLog.log('PLACE_BLOCK', `  UNASSIGNED: ${unassignedImages.length} images not overlapping any block`);
-  }
+  // All images are now assigned to blocks (either overlapping or preceding).
 
   // Step 2: For each block, check if ALL its images fit in the gap.
   // Only insert rows ONCE if the total height overflows.
@@ -854,78 +868,8 @@ async function placeImagesByBlock(
       }
     }
 
-    // Step 4: Fix shifted images that overlap content blocks.
-    let step4Blocks = findAllContentBlocks(sheet, currentGeom);
-    debugLog.log('PLACE_BLOCK', `Step 4: Checking ${rects.filter(r => r.repositioned).length} repositioned images against ${step4Blocks.length} content blocks`);
-    for (const sb of step4Blocks) {
-      debugLog.log('PLACE_BLOCK', `  step4Block: rows ${sb.startRow}-${sb.endRow}`);
-    }
-    // Collect shifted images and sort by their shifted position (top to bottom)
-    const shiftedImages: AnchorRect[] = [];
-    for (const r of rects) {
-      if (!r.repositioned) continue;
-      const origRow = geom.yToRow(r.y1).row;
-      if (rowInsertions.some(ins => ins.atRow <= origRow)) {
-        shiftedImages.push(r);
-      }
-    }
-    shiftedImages.sort((a, b) => a.newY1 - b.newY1);
-    debugLog.log('PLACE_BLOCK', `  ${shiftedImages.length} images shifted by row insertions, need overlap check`);
-
-    for (const r of shiftedImages) {
-      // Use ORIGINAL row to find associated block — original block indices
-      // are stable across row insertions (insertions don't add/remove blocks).
-      const origRow = geom.yToRow(r.y1).row;
-      let assocBlockIdx = -1;
-      for (let i = 0; i < blocks.length; i++) {
-        if (blocks[i].endRow <= origRow + 2) {
-          assocBlockIdx = i;
-        }
-      }
-      if (assocBlockIdx < 0 || assocBlockIdx >= step4Blocks.length) continue;
-
-      const assocBlock = step4Blocks[assocBlockIdx];
-
-      // Place below the associated block
-      r.newY1 = assocBlock.endY + GAP_ROWS * avgRowH;
-      r.x1 = 0;
-      r.x2 = r.w;
-
-      // Check if image extends past the next content block
-      const nextBlockIdx = assocBlockIdx + 1;
-      if (nextBlockIdx < step4Blocks.length) {
-        const imgBottomY = r.newY1 + r.h;
-        const nextBlock = step4Blocks[nextBlockIdx];
-        const gapBuffer = GAP_ROWS * avgRowH;
-
-        if (imgBottomY >= nextBlock.startY - gapBuffer) {
-          // Insert rows to push the next block (and everything after) down
-          const overlapRows = Math.ceil((imgBottomY - (nextBlock.startY - gapBuffer)) / avgRowH) + GAP_ROWS;
-          const insertAtRow = nextBlock.startRow;
-
-          const sheetXml = await readEntryText(zip, sheetFile);
-          if (sheetXml && typeof sheetXml === 'string') {
-            const { xml: newXml, cellMapping: newMapping } = insertRowsInWorksheet(sheetXml, insertAtRow, overlapRows);             zip.file(sheetFile, newXml);
-             for (const [k, v] of newMapping) {
-               for (const [orig, mapped] of cellMapping) {
-                 if (mapped === k) cellMapping.set(orig, v);
-               }
-               cellMapping.set(k, v);
-             }
-             shiftSheetRows(sheet, insertAtRow, overlapRows, newMapping);
-            currentGeom = new DrawingGeometry(sheet);
-            totalRowsInserted += overlapRows;
-            rowInsertions.push({ atRow: insertAtRow, count: overlapRows });
-            step4Blocks = findAllContentBlocks(sheet, currentGeom);
-
-            // Re-place below the (now shifted) associated block
-            if (assocBlockIdx < step4Blocks.length) {
-              r.newY1 = step4Blocks[assocBlockIdx].endY + GAP_ROWS * avgRowH;
-            }
-          }
-        }
-      }
-    }
+    // Step 4 removed: all images are now assigned to blocks in Step 1,
+    // so shifted images are already handled by the block placement logic.
   }
 
   return moved;
@@ -1164,12 +1108,15 @@ export async function fixDrawingOverlaps(
   }
 
   // Phase 4: Final content overlap sweep.
+  // Use the ORIGINAL blocks (computed at function start) as reference.
+  // These blocks represent the content layout BEFORE any row insertions.
+  // After row insertions, content shifted down but blocks still represent
+  // the logical content regions. Images should not overlap these regions.
   {
-    const currentBlocks = findAllContentBlocks(sheet, geom);
     const avgRowHLocal = geom.defaultRowHeight * 12700;
     const GAP_ROWS_LOCAL = 1;
-    debugLog.log('DRAWING', `Phase 4: content overlap sweep — ${rects.length} images, ${currentBlocks.length} blocks`);
-    for (const block of currentBlocks) {
+    debugLog.log('DRAWING', `Phase 4: content overlap sweep — ${rects.length} images, ${blocks.length} blocks`);
+    for (const block of blocks) {
       debugLog.log('DRAWING', `  block: rows ${block.startRow}-${block.endRow}`);
     }
     let sweepMoved = 0;
@@ -1177,9 +1124,11 @@ export async function fixDrawingOverlaps(
       const imgTop = r.newY1;
       const imgBottom = r.newY1 + r.h;
       const imgTopRow = geom.yToRow(imgTop).row;
-      const imgBottomRow = geom.yToRow(imgBottom).row;
-      for (const block of currentBlocks) {
+      for (const block of blocks) {
         // Check if image overlaps this content block (AABB intersection)
+        // Use the block's ORIGINAL Y positions. If the image was repositioned
+        // by the block placement logic, it shouldn't overlap its assigned block.
+        // But if it does (e.g. shifted by row insertions), move it below.
         if (imgTop < block.endY && imgBottom > block.startY) {
           // Place after the block we're overlapping
           const targetY = block.endY + GAP_ROWS_LOCAL * avgRowHLocal;
