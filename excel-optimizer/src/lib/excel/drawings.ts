@@ -1107,47 +1107,61 @@ export async function fixDrawingOverlaps(
     }
   }
 
-  // Phase 4: Final content overlap sweep.
-  // Use the ORIGINAL blocks (computed at function start) as reference.
-  // These blocks represent the content layout BEFORE any row insertions.
-  // After row insertions, content shifted down but blocks still represent
-  // the logical content regions. Images should not overlap these regions.
+  // Phase 4: Content overlap sweep — ITERATIVE.
+  // After spreadRects, some images may have been pushed into content blocks.
+  // We use CURRENT block positions (recomputed from the modified sheet) to
+  // detect and fix these overlaps. Iterate until no more content overlaps.
   {
     const avgRowHLocal = geom.defaultRowHeight * 12700;
     const GAP_ROWS_LOCAL = 1;
-    debugLog.log('DRAWING', `Phase 4: content overlap sweep — ${rects.length} images, ${blocks.length} blocks`);
-    for (const block of blocks) {
-      debugLog.log('DRAWING', `  block: rows ${block.startRow}-${block.endRow}`);
-    }
-    let sweepMoved = 0;
-    for (const r of rects) {
-      const imgTop = r.newY1;
-      const imgBottom = r.newY1 + r.h;
-      const imgTopRow = geom.yToRow(imgTop).row;
-      for (const block of blocks) {
-        // Check if image overlaps this content block (AABB intersection)
-        // Use the block's ORIGINAL Y positions. If the image was repositioned
-        // by the block placement logic, it shouldn't overlap its assigned block.
-        // But if it does (e.g. shifted by row insertions), move it below.
-        if (imgTop < block.endY && imgBottom > block.startY) {
-          // Place after the block we're overlapping
-          const targetY = block.endY + GAP_ROWS_LOCAL * avgRowHLocal;
-          if (Math.abs(targetY - r.newY1) > EMU_PER_PX) {
-            const oldRow = imgTopRow;
-            r.newY1 = targetY;
-            r.x1 = 0;
-            r.x2 = r.w;
-            r.repositioned = true;
-            sweepMoved++;
-            const newRow = geom.yToRow(targetY).row;
-            debugLog.log('DRAWING', `  contentSweep: img#${rects.indexOf(r)} row ${oldRow}→${newRow} (was overlapping block ${block.startRow}-${block.endRow})`);
+    const MAX_SWEEP_ITERATIONS = 5;
+    for (let sweepIter = 0; sweepIter < MAX_SWEEP_ITERATIONS; sweepIter++) {
+      // Recompute blocks from the CURRENT sheet state (after row insertions).
+      // This gives us accurate positions for content that was shifted.
+      let currentGeom = geom;
+      const modifiedXml = await readEntryText(zip, sheetFile);
+      if (modifiedXml && typeof modifiedXml === 'string') {
+        try {
+          const modifiedSheet = parseSheet(modifiedXml, []);
+          currentGeom = new DrawingGeometry(modifiedSheet);
+        } catch { /* fall back to original geom */ }
+      }
+      const currentBlocks = findAllContentBlocks(sheet, currentGeom);
+      if (currentBlocks.length === 0) break;
+
+      debugLog.log('DRAWING', `Phase 4 iter ${sweepIter}: content overlap sweep — ${rects.length} images, ${currentBlocks.length} blocks`);
+      let sweepMoved = 0;
+      for (const r of rects) {
+        const imgTop = r.newY1;
+        const imgBottom = r.newY1 + r.h;
+        for (const block of currentBlocks) {
+          // Check if image overlaps this content block (AABB intersection)
+          if (imgTop < block.endY && imgBottom > block.startY) {
+            // Find the LOWEST block this image overlaps (deepest content)
+            let deepestBlock = block;
+            for (const b2 of currentBlocks) {
+              if (b2.startRow > block.startRow && imgTop < b2.endY && imgBottom > b2.startY) {
+                deepestBlock = b2;
+              }
+            }
+            // Place after the deepest overlapping block
+            const targetY = deepestBlock.endY + GAP_ROWS_LOCAL * avgRowHLocal;
+            if (Math.abs(targetY - r.newY1) > EMU_PER_PX) {
+              const oldRow = currentGeom.yToRow(r.newY1).row;
+              r.newY1 = targetY;
+              r.x1 = 0;
+              r.x2 = r.w;
+              r.repositioned = true;
+              sweepMoved++;
+              const newRow = currentGeom.yToRow(targetY).row;
+              debugLog.log('DRAWING', `  contentSweep: img#${rects.indexOf(r)} row ${oldRow}→${newRow} (was overlapping block ${deepestBlock.startRow}-${deepestBlock.endRow})`);
+            }
+            break;
           }
-          break;
         }
       }
-    }
-    if (sweepMoved > 0) {
-      debugLog.log('DRAWING', `  contentSweep: moved ${sweepMoved} images to resolve content overlaps`);
+      if (sweepMoved === 0) break;
+      debugLog.log('DRAWING', `  contentSweep iter ${sweepIter}: moved ${sweepMoved} images to resolve content overlaps`);
       // Re-spread to resolve any new image-image overlaps from the sweep
       spreadRects(rects);
     }

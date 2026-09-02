@@ -311,12 +311,12 @@ export function formatSheet(
   }
 
   /* --------------- typo corrections for data cells ---------- */
-  // Apply typo/spelling corrections to ALL string cells (not just headings).
-  // This fixes common misspellings like "pupose" → "purpose".
+  // Apply typo/spelling corrections to ALL cells with text content (not just headings).
+  // This fixes common misspellings like "pupose" → "purpose" in any cell.
   if (settings.correctTypos) {
     for (const [row, cells] of sheet.cells) {
       for (const cell of cells.values()) {
-        if (cell.kind !== "string" || cell.hasFormula) continue;
+        if (cell.hasFormula) continue;
         const text = cell.text ?? "";
         if (!text) continue;
         const corrected = correctTypos(text);
