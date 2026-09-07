@@ -346,7 +346,23 @@ describe("Org-like TC01 structure", () => {
       // the image must not overlap content above it — covered by contentOverlaps check
       void prevContent;
     }
-    console.log("PASS: all images preserved, 0 overlaps, all col A");
+    // 7. CRITICAL: No image should move more than 50 rows from its original position.
+    // The OLD code moved img#1 (rId2) from row 41 to row 166 (125 rows away!).
+    // The new code must keep images near their content blocks.
+    const originalFromRows = TC01_ANCHORS.map((a) => a.fromRow);
+    let maxMovement = 0;
+    for (let i = 0; i < anchors.length; i++) {
+      const origRow = originalFromRows[i];
+      const newRow = anchors[i].fromRow; // fromRow is 0-based in anchor XML
+      // Convert to 1-based for comparison: originalFromRows are 0-based anchor rows
+      const movement = Math.abs(newRow - origRow);
+      if (movement > maxMovement) maxMovement = movement;
+      console.log(`  MOVEMENT img#${i}: orig=${origRow} → new=${newRow} (Δ=${movement} rows)`);
+      // No image should jump more than 50 rows from its original position
+      expect(movement).toBeLessThanOrEqual(50);
+    }
+    console.log(`  Max movement: ${maxMovement} rows`);
+    console.log("PASS: all images preserved, 0 overlaps, all col A, movement ≤ 50 rows");
   });
 
   // TC29 from the org debug log: a TALL image (45 rows) assigned to a sparse
@@ -462,6 +478,12 @@ describe("Org-like TC01 structure", () => {
     for (const c of cols) expect(c).toBe(0);
 
     console.log("TC29 WRITTEN (fromRow→toRow):", anchors.map((a) => `${a.fromRow}→${a.toRow}`).join(", "));
-    console.log("TC29 PASS: 13 images preserved, 0 overlaps, all col A");
+    // CRITICAL: No image should move more than 50 rows
+    const tc29OriginalRows = TC29_ANCHORS.map((a) => a.fromRow);
+    for (let i = 0; i < anchors.length; i++) {
+      const movement = Math.abs(anchors[i].fromRow - tc29OriginalRows[i]);
+      expect(movement).toBeLessThanOrEqual(50);
+    }
+    console.log("TC29 PASS: 13 images preserved, 0 overlaps, all col A, movement ≤ 50 rows");
   });
 });
