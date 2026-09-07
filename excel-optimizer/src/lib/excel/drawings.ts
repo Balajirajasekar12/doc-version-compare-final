@@ -869,23 +869,46 @@ async function placeImagesByBlock(
 
   // Step 2: place each block's images right after the block at column A,
   // inserting rows dynamically when the region cannot hold the stack.
+  // CRITICAL: Only move images that ACTUALLY overlap the block's content area.
+  // Images that are in a gap (even if assigned to a block) should stay in
+  // place unless they collide with the stack.
   let moved = 0;
   for (let b = 0; b < blocks.length; b++) {
-    const imgs = rects.filter((r) => r.assignedBlockIdx === b).sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
-    if (imgs.length === 0) continue;
+    const allAssigned = rects.filter((r) => r.assignedBlockIdx === b).sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
+    if (allAssigned.length === 0) continue;
 
     const block = blocks[b];
     const nextBlock = b + 1 < blocks.length ? blocks[b + 1] : null;
-    const streamTopY = block.endY + SPACING;
 
-    // Pre-compute the vertical footprint of this block's region so any
-    // required row insertion happens BEFORE the images are placed. Inserting
-    // after placement splits the stack: the block shifts down but the stack
-    // images below the insertion row shift with it, so the block lands inside
-    // the stack and the residual passes loop forever.
+    // Filter to only images that ACTUALLY overlap the block's content area.
+    // An image that just barely touches the block's bottom boundary but sits
+    // in the gap should NOT be stacked — it should stay in place.
+    const imgs = allAssigned.filter((r) => {
+      const imgTop = r.y1;
+      const imgBottom = r.y1 + r.h;
+      // Image overlaps content if it spans rows within the block's content area
+      return imgTop < block.endY && imgBottom > block.startY;
+    });
+    const gapAssigned = allAssigned.filter((r) => !imgs.includes(r));
+    // Treat non-overlapping assigned images as gap images for this block
+    const allGapImages = [...gapImages, ...gapAssigned].sort((a, c) => a.y1 - c.y1 || a.x1 - c.x1);
+
+    if (imgs.length === 0) {
+      // No images actually overlap this block — nothing to do
+      debugLog.log('PLACE_BLOCK', `  Block ${b} (rows ${block.startRow}-${block.endRow}): ${allAssigned.length} assigned, 0 overlap content — skipping`);
+      continue;
+    }
+
+    debugLog.log('PLACE_BLOCK', `  Block ${b} (rows ${block.startRow}-${block.endRow}): ${imgs.length} overlap content, ${gapAssigned.length} gap (no overlap)`);
+
+    const streamTopY = block.endY + SPACING;
     const regionStartY = block.endY;
     const regionEndY = nextBlock ? nextBlock.startY : Number.POSITIVE_INFINITY;
-    const regionGaps = gapImages.filter((g) => g.newY1 >= regionStartY && g.newY1 < regionEndY);
+    const regionGaps = allGapImages.filter((g) => g.newY1 >= regionStartY && g.newY1 < regionEndY);
+
+    // Only stack images that genuinely overlap content.
+    // For a single overlapping image, place it right after the block (minimal movement).
+    // For multiple overlapping images, stack them preserving order.
     const planned = planRegionStream(imgs, regionGaps, streamTopY, SPACING);
     const occupiedBottomEst = planned.streamBottomY;
     if (nextBlock) {
@@ -897,33 +920,31 @@ async function placeImagesByBlock(
       }
     }
 
-    // (1) Place the assigned images in a stack right after the block, at
-    //     column A, preserving their y-order (document flow).
+    // (1) Place ONLY content-overlapping images in a stack right after the
+    //     block, at column A, preserving their y-order (document flow).
     let cursorY = streamTopY;
     for (const img of imgs) {
+      const origRow = ctx.geom.yToRow(img.y1).row;
       const changed = Math.abs(cursorY - img.newY1) > EMU_PER_PX || img.x1 !== 0;
       img.newY1 = cursorY;
       img.x1 = 0;
       img.x2 = img.w;
       img.repositioned = true;
+      const newRow = ctx.geom.yToRow(cursorY).row;
+      debugLog.log('DRAWING', `  placed img#${rects.indexOf(img)}: row ${origRow} → ${newRow} (content overlap)`);
       if (changed) moved++;
       cursorY += img.h + SPACING;
     }
     const stackBottomY = cursorY - SPACING;
     const placeStartRow = ctx.geom.yToRow(streamTopY).row;
-    debugLog.log('PLACE_BLOCK', `  Placing ${imgs.length} images starting at row ${placeStartRow} (after block ${b} ending at row ${block.endRow})`);
+    debugLog.log('PLACE_BLOCK', `  Placing ${imgs.length} content-overlapping images starting at row ${placeStartRow} (after block ${b} ending at row ${block.endRow})`);
 
     // (2) Gap images in this region that collide with the stack are moved to
     //     the next suitable position BELOW the stack (document flow order is
     //     preserved). Only the position changes — the image, size and aspect
-    //     ratio are untouched. The pre-insertion above already made enough
-    //     room, so the moved set fits before the next content block.
+    //     ratio are untouched.
     let gapCursorY = stackBottomY + SPACING;
-    for (const g of gapImages) {
-      // Images strictly ABOVE the block bottom belong to the previous region.
-      // An image whose top edge touches the block's bottom boundary is still
-      // inside this region: the stack starts just below that edge, so the
-      // image would collide with it and must be pushed below the stack.
+    for (const g of allGapImages) {
       if (g.newY1 < block.endY) continue;
       if (g.newY1 >= regionEndY) break;
       const gBottom = g.newY1 + g.h;
@@ -1167,14 +1188,13 @@ export async function fixDrawingOverlaps(
   }
 
 // Phase 3: Residual image-image overlap resolution.
-  // Any remaining overlap is resolved by INSERTING ROWS at the lower image's
-  // top row (never by cascading the image down the sheet). The lower image and
-  // everything below it shift down exactly as far as needed, which cannot
-  // create new overlaps, so this converges.
+  // ALWAYS move the lower image below the upper image (local fix, no row
+  // insertion). This avoids cascading — inserting rows pushes everything
+  // down which can create new overlaps further down the sheet.
   const avgRowH = geom.defaultRowHeight * 12700;
   {
     let pass = 0;
-    for (; pass < 25; pass++) {
+    for (; pass < 50; pass++) {
       let fixed = false;
       const sorted = [...rects].sort((a, c) => a.newY1 - c.newY1 || a.x1 - c.x1);
       for (let i = 0; i < sorted.length && !fixed; i++) {
@@ -1183,24 +1203,16 @@ export async function fixDrawingOverlaps(
           const b = sorted[j];
           if (rectsOverlap(a.x1, a.newY1, a.x2, a.newY1 + a.h,
                            b.x1, b.newY1, b.x2, b.newY1 + b.h)) {
-            // b is at or below a. If they start on the SAME row, insertion
-            // alone cannot separate them (inserting at b's top shifts both
-            // equally) — move b below a directly. Otherwise insert rows at
-            // b's top row, which shifts only b and everything below it.
-            const aTopRow = ctx.geom.yToRow(a.newY1).row;
-            const bTopRow = ctx.geom.yToRow(b.newY1).row;
-            if (aTopRow >= bTopRow) {
-              b.newY1 = a.newY1 + a.h + SPACING_PX * EMU_PER_PX;
-              b.x1 = 0;
-              b.x2 = b.w;
-              b.repositioned = true;
-              debugLog.log('DRAWING', `  residual img-img: img#${rects.indexOf(b)} stacked on img#${rects.indexOf(a)} — moved below`);
-            } else {
-              const rows = Math.ceil(((a.newY1 + a.h) - b.newY1) / avgRowH) + 1;
-              const atRow = Math.max(1, ctx.geom.yToRow(b.newY1).row);
-              debugLog.log('DRAWING', `  residual img-img: img#${rects.indexOf(a)} overlaps img#${rects.indexOf(b)} — insert ${rows} rows at row ${atRow}`);
-              await ctx.insertRows(atRow, rows);
-            }
+            // Move the lower image (b) directly below the upper image (a).
+            // No row insertion — just reposition locally. This preserves
+            // the logical order and avoids cascading.
+            const bOrigRow = ctx.geom.yToRow(b.newY1).row;
+            b.newY1 = a.newY1 + a.h + SPACING_PX * EMU_PER_PX;
+            b.x1 = 0;
+            b.x2 = b.w;
+            b.repositioned = true;
+            const bNewRow = ctx.geom.yToRow(b.newY1).row;
+            debugLog.log('DRAWING', `  residual img-img: img#${rects.indexOf(b)} row ${bOrigRow} → ${bNewRow} (moved below img#${rects.indexOf(a)})`);
             fixed = true;
             break;
           }
@@ -1212,10 +1224,11 @@ export async function fixDrawingOverlaps(
   }
 
   // Phase 4: Residual content overlap resolution.
-  // By construction placement keeps images out of content, but as a safety
-  // net any image still overlapping a content block pushes that block down by
-  // inserting rows at the block's start — the image never moves, content
-  // moves away from it.
+  // If an image still overlaps a content block, move the image below the
+  // block. If there's not enough space, insert rows at the block's END
+  // (not start) to create space. Inserting at the block's END pushes images
+  // below the block down, but NOT the block itself — so the overlap is
+  // actually resolved.
   {
     let pass = 0;
     for (; pass < 25; pass++) {
@@ -1226,12 +1239,15 @@ export async function fixDrawingOverlaps(
         for (let b = 0; b < blocks.length; b++) {
           const blk = blocks[b];
           if (top < blk.endY && bottom > blk.startY) {
-            const rows = Math.ceil((bottom - blk.startY) / avgRowH) + 1;
-            // The block's top EMU maps to a real 1-based row regardless of
-            // whether the sheet uses 0-based (mock) or 1-based (real) rows.
-            const atRow = Math.max(1, ctx.geom.yToRow(blk.startY).row);
-            debugLog.log('DRAWING', `  residual content: img#${rects.indexOf(r)} overlaps block ${b} (rows ${blk.startRow}-${blk.endRow}) — insert ${rows} rows at row ${atRow}`);
-            await ctx.insertRows(atRow, rows);
+            // Move the image below the block's end
+            const newRow = blk.endY + SPACING_PX * EMU_PER_PX;
+            const origRow = ctx.geom.yToRow(r.newY1).row;
+            r.newY1 = newRow;
+            r.x1 = 0;
+            r.x2 = r.w;
+            r.repositioned = true;
+            const finalRow = ctx.geom.yToRow(newRow).row;
+            debugLog.log('DRAWING', `  residual content: img#${rects.indexOf(r)} row ${origRow} → ${finalRow} (moved below block ${b})`);
             fixed = true;
             break;
           }
